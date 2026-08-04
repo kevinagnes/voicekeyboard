@@ -1,0 +1,18 @@
+# Rust / Cargo
+target/
+**/*.rs.bk
+
+# Build artifacts
+dist/
+
+# Tauri generated schemas
+src-tauri/gen/
+
+# Downloads
+*.part
+
+# macOS
+.DS_Store
+
+# JS
+node_modules/

@@ -1,0 +1,28 @@
+{
+  "$schema": "VoiceKeyboard model registry",
+  "comment": "Add future models here (id, name, filename, URL, optional sha256 checksum). Empty checksum skips verification with a warning.",
+  "models": [
+    {
+      "id": "large-v3-turbo",
+      "name": "Whisper large-v3-turbo (q8_0)",
+      "description": "Default. Fastest accurate pick for EN + PT-BR with clean punctuation. ~1.6 GB.",
+      "filename": "ggml-large-v3-turbo-q8_0.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin",
+      "checksumSha256": "",
+      "sizeBytes": 1621397120,
+      "default": true,
+      "languages": ["auto", "en", "pt"]
+    },
+    {
+      "id": "small",
+      "name": "Whisper small (q5_1)",
+      "description": "Lightweight fallback for low-RAM machines. ~0.5 GB.",
+      "filename": "ggml-small-q5_1.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
+      "checksumSha256": "",
+      "sizeBytes": 475226752,
+      "default": false,
+      "languages": ["auto", "en", "pt"]
+    }
+  ]
+}

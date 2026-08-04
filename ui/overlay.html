@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Recording</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        overflow: hidden;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #panel {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 0 16px;
+        border-radius: 14px;
+        background: rgba(16, 18, 22, 0.72);
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      #dot {
+        width: 10px;
+        height: 10px;
+        min-width: 10px;
+        border-radius: 50%;
+        background: #ff3b30;
+        animation: pulse 0.9s ease-in-out infinite;
+      }
+      #label {
+        color: rgba(255, 255, 255, 0.85);
+        font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        letter-spacing: 0.2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-width: 0;
+      }
+      canvas {
+        display: block;
+        height: 34px;
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 0.4;
+          transform: scale(0.8);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="panel">
+      <div id="dot"></div>
+      <div id="label">Recording</div>
+      <canvas id="wave"></canvas>
+    </div>
+    <script src="overlay.js"></script>
+  </body>
+</html>

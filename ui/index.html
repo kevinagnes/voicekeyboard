@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VoiceKeyboard — Settings</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <h1>VoiceKeyboard</h1>
+      <p class="tagline">Local, offline dictation. Hold the hotkey, speak, release — text appears.</p>
+      <div id="status" class="status">Checking…</div>
+    </header>
+
+    <main class="panel">
+      <section class="card">
+        <h2>Activity</h2>
+        <ul id="activity" class="activity">
+          <li class="activity-empty">Nothing yet. Hold your hotkey and speak.</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>Recording hotkey</h2>
+        <p class="hint">Hold to record, release to transcribe and paste.</p>
+        <div class="row">
+          <input id="hotkey" type="text" placeholder="e.g. ShiftRight or ctrl+KeyG" spellcheck="false" />
+          <button id="captureHotkey" class="secondary">Capture keys…</button>
+        </div>
+        <div id="hotkeyHint" class="hint"></div>
+      </section>
+
+      <section class="card">
+        <h2>Language</h2>
+        <select id="language">
+          <option value="auto">Auto-detect</option>
+          <option value="en">English</option>
+          <option value="pt">Português (Brasil)</option>
+        </select>
+      </section>
+
+      <section class="card">
+        <h2>Model</h2>
+        <p class="hint">Downloaded on first run and cached locally. No audio ever leaves your machine.</p>
+        <div id="models"></div>
+        <div id="downloadProgress" class="download" hidden>
+          <progress id="downloadBar" value="0" max="1"></progress>
+          <span id="downloadText"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Output</h2>
+        <label class="hint" for="initialPrompt">Optional hint to shape formatting:</label>
+        <textarea id="initialPrompt" rows="2"></textarea>
+        <label class="check"><input id="sounds" type="checkbox" /> Play chimes (start / done)</label>
+      </section>
+
+      <section class="card">
+        <h2>Startup</h2>
+        <label class="check"><input id="launchAtLogin" type="checkbox" /> Launch at login</label>
+      </section>
+
+      <section class="card advanced">
+        <h2>Advanced</h2>
+        <div class="grid">
+          <label>Min recording (ms)
+            <input id="minMs" type="number" min="100" max="2000" step="50" />
+          </label>
+          <label>Max recording (s)
+            <input id="maxSecs" type="number" min="30" max="600" step="10" />
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Permissions</h2>
+        <ul id="permissions" class="permissions"></ul>
+        <div class="row">
+          <button id="requestAccessibility" class="secondary">Request Accessibility…</button>
+        </div>
+        <p id="accGuide" class="hint" hidden></p>
+      </section>
+
+      <div class="actions">
+        <button id="save" class="primary">Save settings</button>
+        <span id="saved" class="saved" hidden>Saved ✓</span>
+      </div>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
