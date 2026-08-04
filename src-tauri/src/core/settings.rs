@@ -12,6 +12,7 @@ pub const DEFAULT_MAX_RECORDING_SECS: u64 = 120;
 pub const DEFAULT_MIN_RECORDING_MS: u64 = 300;
 pub const DEFAULT_SOUNDS: bool = true;
 pub const DEFAULT_LAUNCH_AT_LOGIN: bool = false;
+pub const DEFAULT_AUTO_UPDATE: bool = true;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -25,6 +26,7 @@ pub struct Settings {
     pub max_recording_secs: u64,
     pub min_recording_ms: u64,
     pub input_device: String,
+    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -39,6 +41,7 @@ impl Default for Settings {
             max_recording_secs: DEFAULT_MAX_RECORDING_SECS,
             min_recording_ms: DEFAULT_MIN_RECORDING_MS,
             input_device: String::new(),
+            auto_update: DEFAULT_AUTO_UPDATE,
         }
     }
 }

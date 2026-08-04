@@ -49,11 +49,16 @@ async function refreshPermissions() {
   const p = await invoke("get_permissions");
   const list = $("permissions");
   list.innerHTML = "";
+  const micLabels = {
+    authorized: "granted",
+    denied: "denied — open System Settings → Privacy & Security → Microphone and enable VoiceKeyboard.",
+    notDetermined: "not requested — click “Request Microphone…”",
+  };
   const items = [
     {
       label: "Microphone",
-      ok: p.hasInputDevice,
-      missing: "No input device found. Connect a microphone.",
+      ok: p.micPermission === "authorized",
+      missing: micLabels[p.micPermission] || micLabels.notDetermined,
     },
     {
       label: "Accessibility (paste + password detection)",
@@ -75,6 +80,7 @@ async function refreshPermissions() {
     li.appendChild(span);
     list.appendChild(li);
   }
+  $("requestMicrophone").disabled = p.micPermission === "authorized";
 }
 
 async function refreshStats() {
@@ -135,6 +141,43 @@ function fmtBytes(n) {
     i += 1;
   }
   return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+async function refreshUpdateStatus() {
+  try {
+    const u = await invoke("get_update_status");
+    $("version").textContent = u.current_version || "";
+    $("checkUpdates").disabled = u.checking || u.installing;
+    $("installUpdate").disabled = u.checking || u.installing;
+    if (u.installing) {
+      $("updateStatus").textContent = u.total > 0
+        ? `Downloading v${u.available ? u.available.latestVersion : "…"}… ${fmtBytes(u.downloaded)} / ${fmtBytes(u.total)}`
+        : "Preparing update…";
+      $("updateProgress").hidden = false;
+      $("updateBar").value = u.total > 0 ? u.downloaded / u.total : 0;
+      $("updateText").textContent = u.total > 0 ? `${fmtBytes(u.downloaded)} / ${fmtBytes(u.total)}` : "Downloading…";
+      $("installUpdate").hidden = true;
+      return;
+    }
+    if (u.checking) {
+      $("updateStatus").textContent = "Checking for updates…";
+      $("installUpdate").hidden = true;
+      return;
+    }
+    $("updateProgress").hidden = true;
+    if (u.available) {
+      $("updateStatus").textContent = `Update available: v${u.available.latestVersion}`;
+      $("installUpdate").hidden = false;
+      $("updateNotes").hidden = false;
+      $("updateNotes").textContent = (u.available.notes || "").slice(0, 400) || "See the release page for details.";
+    } else {
+      $("updateStatus").textContent = "You’re up to date.";
+      $("installUpdate").hidden = true;
+      $("updateNotes").hidden = true;
+    }
+  } catch (e) {
+    $("updateStatus").textContent = "Update status unavailable";
+  }
 }
 
 async function refreshModels() {
@@ -286,6 +329,7 @@ async function save() {
   state.settings.minRecordingMs = parseInt($("minMs").value, 10) || 300;
   state.settings.maxRecordingSecs = parseInt($("maxSecs").value, 10) || 120;
   state.settings.inputDevice = $("inputDevice").value;
+  state.settings.autoUpdate = $("autoUpdate").checked;
 
   try {
     await invoke("update_settings", { settings: state.settings });
@@ -306,6 +350,7 @@ async function init() {
   $("minMs").value = state.settings.minRecordingMs;
   $("maxSecs").value = state.settings.maxRecordingSecs;
   $("inputDevice").value = state.settings.inputDevice || "";
+  $("autoUpdate").checked = state.settings.autoUpdate !== false;
 
   $("captureHotkey").addEventListener("click", startHotkeyCapture);
   $("hotkey").addEventListener("change", (e) => {
@@ -317,6 +362,24 @@ async function init() {
     markDirty();
   });
   $("save").addEventListener("click", save);
+
+  const micButton = $("requestMicrophone");
+  micButton.addEventListener("click", async () => {
+    micButton.disabled = true;
+    micButton.textContent = "Waiting for permission…";
+    try {
+      const result = await invoke("request_microphone");
+      if (result === "authorized") {
+        addActivity("Microphone access granted", "ok");
+      } else if (result === "denied") {
+        addActivity("Microphone access denied — enable it in System Settings", "warn");
+      }
+    } catch (e) {
+      addActivity(`Microphone request failed: ${e}`, "err");
+    }
+    micButton.textContent = "Request Microphone…";
+    await refreshPermissions();
+  });
 
   const accButton = $("requestAccessibility");
   accButton.addEventListener("click", async () => {
@@ -334,6 +397,28 @@ async function init() {
     }
   });
   setInterval(refreshPermissions, 3000);
+
+  $("checkUpdates").addEventListener("click", async () => {
+    try {
+      await invoke("check_for_updates");
+    } catch (e) {
+      $("updateStatus").textContent = `Failed: ${e}`;
+    }
+  });
+  $("installUpdate").addEventListener("click", async () => {
+    try {
+      await invoke("install_update");
+    } catch (e) {
+      $("updateStatus").textContent = `Failed: ${e}`;
+    }
+  });
+  listen("update-status", () => {
+    refreshUpdateStatus();
+    refreshStatus();
+  });
+  listen("update-download-progress", () => {
+    refreshUpdateStatus();
+  });
 
   listen("model-download-progress", (e) => {
     const p = e.payload;
@@ -393,6 +478,7 @@ async function init() {
   await refreshModels();
   await refreshDevices();
   await refreshPermissions();
+  await refreshUpdateStatus();
   await refreshStats();
   await refreshRecent();
   await refreshStatus();

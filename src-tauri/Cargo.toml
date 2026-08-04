@@ -31,7 +31,9 @@ whisper-rs = { version = "0.16", features = ["metal"] }
 macos-accessibility-client = "0.0"
 accessibility = "0.2"
 objc2-app-kit = "0.3"
+objc2-av-foundation = "0.3"
 objc2 = "0.6"
+block2 = "0.6"
 core-foundation = "0.10"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]

@@ -9,9 +9,10 @@ use tauri::{AppHandle, Emitter, LogicalPosition, Manager, Position, State, Webvi
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as _;
 
-use crate::core::{capture, hotkey, paste, settings, sounds, stt};
+use crate::core::{capture, hotkey, mic, paste, settings, sounds, stt};
 use crate::downloader::{is_valid_model_file, Downloader};
 use crate::model_registry::ModelRegistry;
+use crate::updater::{self, UpdateInfo};
 
 pub const EVT_RECORDING_STARTED: &str = "recording-started";
 pub const EVT_RECORDING_STOPPED: &str = "recording-stopped";
@@ -23,6 +24,8 @@ pub const EVT_DOWNLOAD_PROGRESS: &str = "model-download-progress";
 pub const EVT_MODEL_LOADED: &str = "model-loaded";
 pub const EVT_MODEL_MISSING: &str = "model-missing";
 pub const EVT_SETTINGS_CHANGED: &str = "settings-changed";
+pub const EVT_UPDATE_STATUS: &str = "update-status";
+pub const EVT_UPDATE_PROGRESS: &str = "update-download-progress";
 
 const TRAY_ID: &str = "main";
 const OVERLAY_ID: &str = "recording-overlay";
@@ -59,6 +62,10 @@ pub struct AppState {
     pub busy: AtomicBool,
     pub model_loaded: AtomicBool,
     pub hotkey_ok: AtomicBool,
+    pub update: Mutex<Option<UpdateInfo>>,
+    pub update_checking: AtomicBool,
+    pub update_installing: AtomicBool,
+    pub update_progress: Mutex<Option<(u64, u64)>>,
 }
 
 const MAX_RECENT: usize = 3;
@@ -82,6 +89,10 @@ impl AppState {
             busy: AtomicBool::new(false),
             model_loaded: AtomicBool::new(false),
             hotkey_ok: AtomicBool::new(true),
+            update: Mutex::new(None),
+            update_checking: AtomicBool::new(false),
+            update_installing: AtomicBool::new(false),
+            update_progress: Mutex::new(None),
         }
     }
 }
@@ -135,6 +146,40 @@ pub struct TranscriptDto {
 pub struct PermissionsDto {
     pub accessibility_trusted: bool,
     pub has_input_device: bool,
+    pub mic_permission: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatusDto {
+    pub checking: bool,
+    pub installing: bool,
+    pub downloaded: u64,
+    pub total: u64,
+    pub current_version: String,
+    pub available: Option<UpdateInfoDto>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfoDto {
+    pub latest_version: String,
+    pub current_version: String,
+    pub notes: String,
+    pub url: String,
+    pub dmg_url: String,
+}
+
+impl From<UpdateInfo> for UpdateInfoDto {
+    fn from(u: UpdateInfo) -> Self {
+        Self {
+            latest_version: u.latest_version,
+            current_version: u.current_version,
+            notes: u.notes,
+            url: u.url,
+            dmg_url: u.dmg_url,
+        }
+    }
 }
 
 pub fn run() {
@@ -153,10 +198,14 @@ pub fn run() {
             get_permissions,
             get_audio_level,
             request_accessibility,
+            request_microphone,
             get_inference_stats,
             get_input_devices,
             get_recent_transcriptions,
             copy_transcription,
+            check_for_updates,
+            install_update,
+            get_update_status,
         ])
         .setup(move |app| {
             let state = &setup_state;
@@ -179,6 +228,23 @@ pub fn run() {
                     "settings" => open_settings(app),
                     "chimes" => toggle_chimes(app),
                     "paste-last" => paste_last(app),
+                    "check-updates" => {
+                        if let Some(state) = app.try_state::<Arc<AppState>>() {
+                            if state.update.lock().is_some() {
+                                let handle = app.clone();
+                                let state2 = state.inner().clone();
+                                let _ = tauri::async_runtime::spawn_blocking(move || {
+                                    install_update_impl(&handle, &state2)
+                                });
+                            } else {
+                                let handle = app.clone();
+                                let state2 = state.inner().clone();
+                                let _ = tauri::async_runtime::spawn_blocking(move || {
+                                    check_for_updates_impl(&handle, &state2)
+                                });
+                            }
+                        }
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -235,6 +301,30 @@ pub fn run() {
             spawn_stt_worker(handle.clone(), state.clone(), job_rx);
             spawn_hotkey_thread(handle.clone(), state.clone());
             spawn_model_loader(handle.clone(), state.clone());
+
+            // Trigger the mic TCC prompt proactively when it hasn't been
+            // asked yet (cpal alone never shows it).
+            let mic_state = state.clone();
+            std::thread::spawn(move || {
+                if mic::mic_permission() == mic::MicPermission::NotDetermined {
+                    debug_log("mic: requesting permission (TCC prompt)");
+                    let status = mic::request_mic_permission();
+                    debug_log(&format!("mic: status after request = {status:?}"));
+                    if status == mic::MicPermission::Authorized {
+                        rebuild_recorder(&mic_state);
+                    }
+                }
+            });
+
+            // Auto-update check shortly after launch.
+            if state.settings.lock().auto_update {
+                let upd_handle = handle.clone();
+                let upd_state = state.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(8));
+                    check_for_updates_impl(&upd_handle, &upd_state);
+                });
+            }
 
             {
                 let marker = crate::app_data_dir().join(".setup_done");
@@ -621,6 +711,17 @@ fn build_menu(app: &AppHandle, state: &AppState) -> tauri::Result<tauri::menu::M
         None::<&str>,
     )?;
     let open = MenuItem::with_id(app, "settings", "Open Settings…", true, Some("CmdOrCtrl+,"))?;
+    let check_updates = if let Some(update) = state.update.lock().as_ref() {
+        MenuItem::with_id(
+            app,
+            "check-updates",
+            format!("Update available — v{}", update.latest_version),
+            true,
+            None::<&str>,
+        )?
+    } else {
+        MenuItem::with_id(app, "check-updates", "Check for updates…", true, None::<&str>)?
+    };
     let chimes = CheckMenuItem::with_id(
         app,
         "chimes",
@@ -630,7 +731,7 @@ fn build_menu(app: &AppHandle, state: &AppState) -> tauri::Result<tauri::menu::M
         None::<&str>,
     )?;
     let quit = PredefinedMenuItem::quit(app, Some("Quit VoiceKeyboard"))?;
-    Menu::with_items(app, &[&status, &paste_last, &open, &chimes, &quit])
+    Menu::with_items(app, &[&status, &paste_last, &open, &check_updates, &chimes, &quit])
 }
 
 fn toggle_chimes(app: &AppHandle) {
@@ -797,6 +898,11 @@ fn get_permissions(state: State<'_, Arc<AppState>>) -> PermissionsDto {
     PermissionsDto {
         accessibility_trusted: paste::accessibility_trusted(),
         has_input_device: state.recorder.lock().is_some(),
+        mic_permission: match mic::mic_permission() {
+            mic::MicPermission::Authorized => "authorized".into(),
+            mic::MicPermission::Denied => "denied".into(),
+            mic::MicPermission::NotDetermined => "notDetermined".into(),
+        },
     }
 }
 
@@ -808,6 +914,35 @@ fn request_accessibility(app: AppHandle) -> bool {
     });
     rx.recv_timeout(std::time::Duration::from_secs(5))
         .unwrap_or(false)
+}
+
+#[tauri::command]
+fn request_microphone(app: AppHandle, state: State<'_, Arc<AppState>>) -> String {
+    let status = mic::request_mic_permission();
+    debug_log(&format!("mic: permission request result = {status:?}"));
+    if status == mic::MicPermission::Authorized {
+        rebuild_recorder(state.inner());
+        let _ = app.emit(EVT_SETTINGS_CHANGED, ());
+    }
+    match status {
+        mic::MicPermission::Authorized => "authorized".into(),
+        mic::MicPermission::Denied => "denied".into(),
+        mic::MicPermission::NotDetermined => "notDetermined".into(),
+    }
+}
+
+fn rebuild_recorder(state: &AppState) {
+    let (max_secs, device_name) = {
+        let s = state.settings.lock();
+        (s.max_recording_secs, s.input_device.clone())
+    };
+    let rebuilt = capture::AudioRecorder::new(max_secs, &device_name).ok();
+    if rebuilt.is_some() {
+        debug_log("recorder: rebuilt");
+        *state.recorder.lock() = rebuilt;
+    } else {
+        debug_log("recorder: rebuild failed (still no device)");
+    }
 }
 
 #[tauri::command]
@@ -877,7 +1012,7 @@ fn apply_settings(
     app: &AppHandle,
     state: &Arc<AppState>,
     s: &settings::Settings,
-    rebuild_recorder: bool,
+    rebuild: bool,
 ) {
     state.sounds.set_enabled(s.sounds);
 
@@ -903,8 +1038,8 @@ fn apply_settings(
         false => autolaunch.disable(),
     };
 
-    if rebuild_recorder {
-        *state.recorder.lock() = capture::AudioRecorder::new(s.max_recording_secs, &s.input_device).ok();
+    if rebuild {
+        rebuild_recorder(state);
     }
 
     let active = state.registry.resolve_path(&s.model_id);
@@ -1049,5 +1184,156 @@ fn download_model(
     model_id: String,
 ) -> Result<(), String> {
     start_download(&app, state.inner(), &model_id);
+    Ok(())
+}
+
+fn check_for_updates_impl(app: &AppHandle, state: &Arc<AppState>) {
+    if state.update_checking.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    debug_log("update: checking GitHub releases…");
+    let _ = app.emit(EVT_UPDATE_STATUS, UpdateStatusDto {
+        checking: true,
+        installing: false,
+        downloaded: 0,
+        total: 0,
+        current_version: env!("CARGO_PKG_VERSION").into(),
+        available: None,
+    });
+
+    let result = updater::check();
+    state.update_checking.store(false, Ordering::SeqCst);
+
+    match result {
+        Ok(Some(info)) => {
+            debug_log(&format!(
+                "update: v{} available",
+                info.latest_version
+            ));
+            let dto: UpdateInfoDto = info.clone().into();
+            *state.update.lock() = Some(info);
+            let _ = app.emit(EVT_UPDATE_STATUS, UpdateStatusDto {
+                checking: false,
+                installing: false,
+                downloaded: 0,
+                total: 0,
+                current_version: env!("CARGO_PKG_VERSION").into(),
+                available: Some(dto),
+            });
+        }
+        Ok(None) => {
+            debug_log("update: up to date");
+            *state.update.lock() = None;
+            let _ = app.emit(EVT_UPDATE_STATUS, UpdateStatusDto {
+                checking: false,
+                installing: false,
+                downloaded: 0,
+                total: 0,
+                current_version: env!("CARGO_PKG_VERSION").into(),
+                available: None,
+            });
+        }
+        Err(e) => {
+            debug_log(&format!("update: check failed -> {e}"));
+            *state.update.lock() = None;
+            emit_error(app, &e);
+        }
+    }
+    update_tray(app, state);
+}
+
+#[tauri::command]
+fn check_for_updates(app: AppHandle, state: State<'_, Arc<AppState>>) {
+    check_for_updates_impl(&app, state.inner());
+}
+
+#[tauri::command]
+fn get_update_status(state: State<'_, Arc<AppState>>) -> UpdateStatusDto {
+    let (progress, available) = {
+        let p = state.update_progress.lock().clone();
+        let a = state.update.lock().clone().map(UpdateInfoDto::from);
+        (p, a)
+    };
+    UpdateStatusDto {
+        checking: state.update_checking.load(Ordering::SeqCst),
+        installing: state.update_installing.load(Ordering::SeqCst),
+        downloaded: progress.map(|(d, _)| d).unwrap_or(0),
+        total: progress.map(|(_, t)| t).unwrap_or(0),
+        current_version: env!("CARGO_PKG_VERSION").into(),
+        available,
+    }
+}
+
+#[tauri::command]
+fn install_update(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    install_update_impl(&app, state.inner())
+}
+
+fn install_update_impl(app: &AppHandle, state: &Arc<AppState>) -> Result<(), String> {
+    if state.update_installing.swap(true, Ordering::SeqCst) {
+        return Err("update install already in progress".into());
+    }
+    let Some(info) = state.update.lock().clone() else {
+        state.update_installing.store(false, Ordering::SeqCst);
+        return Err("no update available".into());
+    };
+    if updater::is_running_from_mounted_dmg() {
+        state.update_installing.store(false, Ordering::SeqCst);
+        return Err(
+            "you are running VoiceKeyboard from the mounted DMG — move it to /Applications first"
+                .into(),
+        );
+    }
+
+    let handle = app.clone();
+    let state2 = state.clone();
+    std::thread::Builder::new()
+        .name("update-install".into())
+        .spawn(move || {            let _ = handle.emit(EVT_UPDATE_STATUS, UpdateStatusDto {
+                checking: false,
+                installing: true,
+                downloaded: 0,
+                total: 0,
+                current_version: env!("CARGO_PKG_VERSION").into(),
+                available: Some(info.clone().into()),
+            });
+            let result = updater::download(&info, {
+                let h = handle.clone();
+                let s = state2.clone();
+                move |done, total| {
+                    *s.update_progress.lock() = Some((done, total));
+                    let _ = h.emit(
+                        EVT_UPDATE_PROGRESS,
+                        serde_json::json!({ "downloaded": done, "total": total }),
+                    );
+                }
+            })
+            .and_then(|dmg| updater::stage_and_install(&dmg));
+
+            match result {
+                Ok(()) => {
+                    state2.update_installing.store(false, Ordering::SeqCst);
+                    debug_log("update: staged — quitting for swap + relaunch");
+                    let _ = handle.emit(EVT_UPDATE_STATUS, UpdateStatusDto {
+                        checking: false,
+                        installing: false,
+                        downloaded: 0,
+                        total: 0,
+                        current_version: env!("CARGO_PKG_VERSION").into(),
+                        available: None,
+                    });
+                    // The detached installer swaps bundles and relaunches.
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    handle.exit(0);
+                }
+                Err(e) => {
+                    state2.update_installing.store(false, Ordering::SeqCst);
+                    state2.update_progress.lock().take();
+                    debug_log(&format!("update: install failed -> {e}"));
+                    emit_error(&handle, &format!("Update install failed: {e}"));
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
     Ok(())
 }

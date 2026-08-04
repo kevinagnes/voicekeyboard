@@ -57,6 +57,28 @@ xcrun notarytool store-credentials "VoiceKeyboard" \
 env vars instead. `tools/make_app.sh` builds a locally ad-hoc-signed `.app`
 without a Developer account.
 
+### One-command release (bump → build → sign → notarize → GitHub release)
+
+```sh
+cargo increment -v p     # patch: 1.0.0 → 1.0.1
+cargo increment -v m     # minor: 1.0.0 → 1.1.0
+cargo increment -v M     # major: 1.0.0 → 2.0.0
+cargo increment --dry-run          # preview the bump only
+cargo increment --no-push          # build + tag locally, no push/release
+```
+
+Bumps the version in `Cargo.toml` / `tauri.conf.json`, builds + signs +
+notarizes via `tools/package.sh`, commits, tags `vX.Y.Z`, pushes, and creates a
+GitHub release with the DMG. Local-only overrides (e.g. `GH_TOKEN`) can be set
+in `.local.env` (gitignored).
+
+## Auto-update
+
+The app checks GitHub releases on launch (toggleable in Settings). When a new
+version is available it shows a tray menu entry and a "Download & install"
+button in Settings, downloads the DMG, and swaps the app bundle with a
+relaunch.
+
 ## First run / model download
 
 The default model (`whisper large-v3-turbo`, ~1.6 GB, q8_0) is **not bundled**. It downloads

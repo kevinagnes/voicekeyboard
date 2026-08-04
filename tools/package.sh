@@ -34,7 +34,7 @@ cp target/release/voicekeyboard "$MACOS/VoiceKeyboard"
 cp icons/icon.icns "$RES/icon.icns"
 cp icons/icon.png "$RES/icon.png"
 
-cat > "$CONTENTS/Info.plist" <<'PLIST'
+cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
