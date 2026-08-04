@@ -676,7 +676,7 @@ fn show_overlay(app: &AppHandle, state: &Arc<AppState>) {
         let Some(win) = ensure_overlay(&handle, &state) else {
             return;
         };
-        position_overlay_near_cursor(&win);
+        position_overlay_bottom_center(&win);
         let _ = win.set_ignore_cursor_events(true);
         let _ = win.show();
     });
@@ -746,19 +746,6 @@ fn main_screen_logical() -> (f64, f64) {
 #[cfg(not(target_os = "macos"))]
 fn main_screen_logical() -> (f64, f64) {
     (1440.0, 900.0)
-}
-
-fn position_overlay_near_cursor(win: &tauri::WebviewWindow<tauri::Wry>) {
-    if let Ok(pos) = win.cursor_position() {
-        let x = pos.x - OVERLAY_W / 2.0;
-        let y = pos.y - OVERLAY_H - 20.0;
-        let _ = win.set_position(Position::Logical(LogicalPosition::new(
-            x.max(0.0),
-            y.max(0.0),
-        )));
-    } else {
-        position_overlay_bottom_center(win);
-    }
 }
 
 fn emit_error(app: &AppHandle, message: &str) {

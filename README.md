@@ -6,6 +6,8 @@ field. 100% on-device — no audio leaves your machine.
 
 Implements the spec in [`prompt.md`](prompt.md).
 
+Technology: https://doc.rust-lang.org/stable/cargo/
+
 ## Architecture
 
 | Component | File | Responsibility |
@@ -102,4 +104,4 @@ synthesis, registry parsing, and SHA-256 verification.
 - [x] M1 — macOS core (hotkey hold/release, record, turbo model, paste, chimes)
 - [x] M2 — UX shell (menu bar, tray status, settings, secure-field guard, launch at login)
 - [x] M3 — Ship-ready macOS (signing + notarization, DMG) — needs an Apple Developer account
-- [ ] M4 — Windows port (tray, hotkey + paste parity, installer)
+- [x] M4 — Windows port (tray, hotkey + paste parity, installer)
