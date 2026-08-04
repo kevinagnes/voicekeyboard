@@ -17,6 +17,7 @@ TEAM_ID="${VK_TEAM_ID:-2JNC7VSQ8N}"
 APPLE_ID="${VK_APPLE_ID:-}"
 NOTARY_PASSWORD="${VK_NOTARY_PASSWORD:-}"
 PROFILE="${VK_NOTARY_PROFILE:-VoiceKeyboard}"
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 
 echo "==> Building release binary…"
 cargo build --release
@@ -47,9 +48,9 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
 	<key>CFBundleDisplayName</key>
 	<string>VoiceKeyboard</string>
 	<key>CFBundleVersion</key>
-	<string>0.1.0</string>
+	<string>${VERSION}</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>${VERSION}</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleIconFile</key>

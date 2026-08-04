@@ -17,5 +17,8 @@ src-tauri/gen/
 # macOS
 .DS_Store
 
+# Local-only env overrides (secrets)
+.local.env
+
 # JS
 node_modules/
