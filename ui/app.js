@@ -27,6 +27,24 @@ async function refreshStatus() {
   }
 }
 
+async function refreshDevices() {
+  try {
+    const devices = await invoke("get_input_devices");
+    const sel = $("inputDevice");
+    const current = state.settings.inputDevice || "";
+    sel.innerHTML = '<option value="">System default</option>';
+    for (const d of devices) {
+      const opt = document.createElement("option");
+      opt.value = d;
+      opt.textContent = d;
+      opt.selected = d === current;
+      sel.appendChild(opt);
+    }
+  } catch (e) {
+    // devices not available
+  }
+}
+
 async function refreshPermissions() {
   const p = await invoke("get_permissions");
   const list = $("permissions");
@@ -56,6 +74,55 @@ async function refreshPermissions() {
     }
     li.appendChild(span);
     list.appendChild(li);
+  }
+}
+
+async function refreshStats() {
+  try {
+    const s = await invoke("get_inference_stats");
+    $("statRuns").textContent = s.total_runs || "—";
+    $("statAvgMs").textContent = s.avg_ms ? `${s.avg_ms} ms` : "—";
+    $("statTotalMs").textContent = s.total_ms ? `${(s.total_ms / 1000).toFixed(1)} s` : "—";
+    $("statAvgSegs").textContent = s.avg_segments || "—";
+  } catch (e) {
+    // stats not available yet
+  }
+}
+
+async function refreshRecent() {
+  try {
+    const items = await invoke("get_recent_transcriptions");
+    const container = $("recentList");
+    container.innerHTML = "";
+    if (!items || items.length === 0) {
+      container.innerHTML = '<div class="hint">No transcriptions yet.</div>';
+      return;
+    }
+    for (let i = 0; i < items.length; i++) {
+      const row = document.createElement("div");
+      row.className = "recent-row";
+      const text = document.createElement("span");
+      text.className = "recent-text";
+      text.textContent = items[i];
+      const btn = document.createElement("button");
+      btn.className = "secondary recent-copy";
+      btn.textContent = "Copy";
+      btn.addEventListener("click", async () => {
+        try {
+          await invoke("copy_transcription", { index: i });
+          btn.textContent = "Copied!";
+          setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+        } catch (e) {
+          btn.textContent = "Failed";
+          setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+        }
+      });
+      row.appendChild(text);
+      row.appendChild(btn);
+      container.appendChild(row);
+    }
+  } catch (e) {
+    // recent not available yet
   }
 }
 
@@ -218,6 +285,7 @@ async function save() {
   state.settings.initialPrompt = $("initialPrompt").value;
   state.settings.minRecordingMs = parseInt($("minMs").value, 10) || 300;
   state.settings.maxRecordingSecs = parseInt($("maxSecs").value, 10) || 120;
+  state.settings.inputDevice = $("inputDevice").value;
 
   try {
     await invoke("update_settings", { settings: state.settings });
@@ -237,10 +305,15 @@ async function init() {
   $("initialPrompt").value = state.settings.initialPrompt;
   $("minMs").value = state.settings.minRecordingMs;
   $("maxSecs").value = state.settings.maxRecordingSecs;
+  $("inputDevice").value = state.settings.inputDevice || "";
 
   $("captureHotkey").addEventListener("click", startHotkeyCapture);
   $("hotkey").addEventListener("change", (e) => {
     state.settings.hotkey = e.target.value.trim();
+    markDirty();
+  });
+  $("inputDevice").addEventListener("change", (e) => {
+    state.settings.inputDevice = e.target.value;
     markDirty();
   });
   $("save").addEventListener("click", save);
@@ -297,11 +370,12 @@ async function init() {
   listen("transcript", (e) => {
     refreshStatus();
     const text = (e.payload && e.payload.text) || "";
-    addActivity(`Pasted: ${text}`, "ok");
-  });
-  listen("discarded", (e) => {
-    refreshStatus();
-    addActivity(`Discarded (${e.payload || "empty"})`, "warn");
+    const ms = (e.payload && e.payload.inference_ms) || 0;
+    const segs = (e.payload && e.payload.n_segments) || 0;
+    const suffix = ms > 0 ? ` (${ms}ms, ${segs} segs)` : "";
+    addActivity(`Copied: ${text}${suffix}`, "ok");
+    refreshStats();
+    refreshRecent();
   });
   listen("secure-skipped", () => {
     refreshStatus();
@@ -317,7 +391,10 @@ async function init() {
   });
 
   await refreshModels();
+  await refreshDevices();
   await refreshPermissions();
+  await refreshStats();
+  await refreshRecent();
   await refreshStatus();
 }
 

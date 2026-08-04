@@ -17,7 +17,6 @@ pub const EVT_RECORDING_STARTED: &str = "recording-started";
 pub const EVT_RECORDING_STOPPED: &str = "recording-stopped";
 pub const EVT_TRANSCRIBING: &str = "transcribing";
 pub const EVT_TRANSCRIPT: &str = "transcript";
-pub const EVT_DISCARDED: &str = "discarded";
 pub const EVT_SECURE_SKIPPED: &str = "secure-skipped";
 pub const EVT_ERROR: &str = "app-error";
 pub const EVT_DOWNLOAD_PROGRESS: &str = "model-download-progress";
@@ -55,11 +54,14 @@ pub struct AppState {
     download_progress: Mutex<Option<(u64, u64)>>,
     overlay: Mutex<Option<tauri::WebviewWindow<tauri::Wry>>>,
     pending_paste: Mutex<Option<PendingPaste>>,
+    recent: Mutex<Vec<String>>,
     pub recording: AtomicBool,
     pub busy: AtomicBool,
     pub model_loaded: AtomicBool,
     pub hotkey_ok: AtomicBool,
 }
+
+const MAX_RECENT: usize = 3;
 
 impl AppState {
     pub fn new() -> Self {
@@ -75,6 +77,7 @@ impl AppState {
             download_progress: Mutex::new(None),
             overlay: Mutex::new(None),
             pending_paste: Mutex::new(None),
+            recent: Mutex::new(Vec::new()),
             recording: AtomicBool::new(false),
             busy: AtomicBool::new(false),
             model_loaded: AtomicBool::new(false),
@@ -123,6 +126,8 @@ pub struct DownloadProgressDto {
 pub struct TranscriptDto {
     pub text: String,
     pub language: String,
+    pub inference_ms: u64,
+    pub n_segments: i32,
 }
 
 #[derive(Serialize, Clone)]
@@ -148,6 +153,10 @@ pub fn run() {
             get_permissions,
             get_audio_level,
             request_accessibility,
+            get_inference_stats,
+            get_input_devices,
+            get_recent_transcriptions,
+            copy_transcription,
         ])
         .setup(move |app| {
             let state = &setup_state;
@@ -208,8 +217,11 @@ pub fn run() {
             }
             *state.hotkeys.lock() = Some(controller);
 
-            let max_secs = state.settings.lock().max_recording_secs;
-            let recorder = capture::AudioRecorder::new(max_secs);
+            let (max_secs, device_name) = {
+                let s = state.settings.lock();
+                (s.max_recording_secs, s.input_device.clone())
+            };
+            let recorder = capture::AudioRecorder::new(max_secs, &device_name);
             match recorder {
                 Ok(r) => {
                     debug_log("recorder: started");
@@ -223,6 +235,18 @@ pub fn run() {
             spawn_stt_worker(handle.clone(), state.clone(), job_rx);
             spawn_hotkey_thread(handle.clone(), state.clone());
             spawn_model_loader(handle.clone(), state.clone());
+
+            {
+                let marker = crate::app_data_dir().join(".setup_done");
+                if !marker.exists() {
+                    let h = handle.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        open_settings(&h);
+                        let _ = std::fs::write(&marker, "");
+                    });
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -302,13 +326,13 @@ fn paste_last(app: &AppHandle) {
     };
     if let Some(text) = text {
         if !text.is_empty() {
-            debug_log("paste-last: attempting");
+            debug_log("copy-last: attempting");
             match paste_text_on_main(app, &text) {
                 Ok(outcome) if outcome.pasted => {
                     state.sounds.play(sounds::Chime::PasteDone);
-                    debug_log("paste-last: ok");
+                    debug_log("copy-last: ok");
                 }
-                Ok(_) => debug_log("paste-last: skipped"),
+                Ok(_) => debug_log("copy-last: skipped"),
                 Err(e) => emit_error(app, &e),
             }
         }
@@ -356,7 +380,7 @@ fn spawn_stt_worker(app: AppHandle, state: Arc<AppState>, rx: mpsc::Receiver<Job
                             Ok(transcription) => {
                                 if transcription.text.trim().is_empty() {
                                     debug_log("stt: empty transcript");
-                                    let _ = app.emit(EVT_DISCARDED, "Empty transcript — try again.");
+                                    state.sounds.play(sounds::Chime::Error);
                                     hide_overlay_delayed(&app, std::time::Duration::from_millis(900));
                                 } else {
                                     debug_log(&format!(
@@ -364,6 +388,11 @@ fn spawn_stt_worker(app: AppHandle, state: Arc<AppState>, rx: mpsc::Receiver<Job
                                         transcription.text.trim(),
                                         transcription.language
                                     ));
+                                    {
+                                        let mut recent = state.recent.lock();
+                                        recent.insert(0, transcription.text.clone());
+                                        recent.truncate(MAX_RECENT);
+                                    }
                                     store_pending_paste(&app, &state, &transcription.text);
                                     match paste_text_on_main(&app, &transcription.text) {
                                         Ok(outcome) if outcome.pasted => {
@@ -373,6 +402,8 @@ fn spawn_stt_worker(app: AppHandle, state: Arc<AppState>, rx: mpsc::Receiver<Job
                                                 TranscriptDto {
                                                     text: transcription.text,
                                                     language: transcription.language,
+                                                    inference_ms: transcription.inference_ms,
+                                                    n_segments: transcription.n_segments,
                                                 },
                                             );
                                             hide_overlay_delayed(
@@ -462,8 +493,11 @@ fn on_pressed(app: &AppHandle, state: &Arc<AppState>) {
     {
         let mut recorder = state.recorder.lock();
         if recorder.is_none() {
-            let max_secs = state.settings.lock().max_recording_secs;
-            *recorder = capture::AudioRecorder::new(max_secs).ok();
+            let (max_secs, device_name) = {
+                let s = state.settings.lock();
+                (s.max_recording_secs, s.input_device.clone())
+            };
+            *recorder = capture::AudioRecorder::new(max_secs, &device_name).ok();
         }
         if let Some(recorder) = recorder.as_ref() {
             recorder.start();
@@ -523,12 +557,7 @@ fn on_released(app: &AppHandle, state: &Arc<AppState>) {
         debug_log(&format!(
             "discard: too-short trimmed_ms={ms} min_ms={min_ms} peak={peak:.4}"
         ));
-        let reason = if peak < 0.001 {
-            "Too short / no mic signal. Check microphone permission and input level in Settings."
-        } else {
-            "Too short — hold the hotkey a bit longer."
-        };
-        let _ = app.emit(EVT_DISCARDED, reason);
+        state.sounds.play(sounds::Chime::Error);
         hide_overlay_delayed(app, std::time::Duration::from_millis(900));
         return;
     }
@@ -647,6 +676,7 @@ fn show_overlay(app: &AppHandle, state: &Arc<AppState>) {
         let Some(win) = ensure_overlay(&handle, &state) else {
             return;
         };
+        position_overlay_near_cursor(&win);
         let _ = win.set_ignore_cursor_events(true);
         let _ = win.show();
     });
@@ -716,6 +746,19 @@ fn main_screen_logical() -> (f64, f64) {
 #[cfg(not(target_os = "macos"))]
 fn main_screen_logical() -> (f64, f64) {
     (1440.0, 900.0)
+}
+
+fn position_overlay_near_cursor(win: &tauri::WebviewWindow<tauri::Wry>) {
+    if let Ok(pos) = win.cursor_position() {
+        let x = pos.x - OVERLAY_W / 2.0;
+        let y = pos.y - OVERLAY_H - 20.0;
+        let _ = win.set_position(Position::Logical(LogicalPosition::new(
+            x.max(0.0),
+            y.max(0.0),
+        )));
+    } else {
+        position_overlay_bottom_center(win);
+    }
 }
 
 fn emit_error(app: &AppHandle, message: &str) {
@@ -791,25 +834,53 @@ fn get_audio_level(state: State<'_, Arc<AppState>>) -> u32 {
 }
 
 #[tauri::command]
+fn get_inference_stats(state: State<'_, Arc<AppState>>) -> stt::InferenceStats {
+    state.stt.stats()
+}
+
+#[tauri::command]
+fn get_input_devices() -> Vec<String> {
+    capture::list_input_devices()
+}
+
+#[tauri::command]
+fn get_recent_transcriptions(state: State<'_, Arc<AppState>>) -> Vec<String> {
+    state.recent.lock().clone()
+}
+
+#[tauri::command]
+fn copy_transcription(_app: AppHandle, state: State<'_, Arc<AppState>>, index: usize) -> Result<(), String> {
+    let text = {
+        let recent = state.recent.lock();
+        recent.get(index).cloned().ok_or("invalid index")?
+    };
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(&text).map_err(|e| e.to_string())?;
+    state.sounds.play(sounds::Chime::PasteDone);
+    Ok(())
+}
+
+#[tauri::command]
 fn update_settings(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
     settings: settings::Settings,
 ) -> Result<(), String> {
-    let (changed, max_changed) = {
+    let (changed, max_changed, device_changed) = {
         let mut current = state.settings.lock();
         let max_changed = current.max_recording_secs != settings.max_recording_secs;
+        let device_changed = current.input_device != settings.input_device;
         if *current == settings {
-            (false, false)
+            (false, false, false)
         } else {
             *current = settings.clone();
-            (true, max_changed)
+            (true, max_changed, device_changed)
         }
     };
     settings::save(&settings).map_err(|e| e.to_string())?;
 
     if changed {
-        apply_settings(&app, &state, &settings, max_changed);
+        apply_settings(&app, &state, &settings, max_changed || device_changed);
         let _ = app.emit(EVT_SETTINGS_CHANGED, ());
     }
     Ok(())
@@ -846,7 +917,7 @@ fn apply_settings(
     };
 
     if rebuild_recorder {
-        *state.recorder.lock() = capture::AudioRecorder::new(s.max_recording_secs).ok();
+        *state.recorder.lock() = capture::AudioRecorder::new(s.max_recording_secs, &s.input_device).ok();
     }
 
     let active = state.registry.resolve_path(&s.model_id);

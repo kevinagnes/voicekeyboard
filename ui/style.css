@@ -307,3 +307,49 @@ button.secondary:hover {
   color: var(--ok);
   font-size: 13px;
 }
+
+.stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 16px;
+}
+
+.stat {
+  font-size: 13px;
+}
+
+.stat-label {
+  color: var(--muted);
+}
+
+.recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.recent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.recent-row:first-child {
+  border-top: none;
+}
+
+.recent-text {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-copy {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 4px 10px;
+}

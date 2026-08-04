@@ -24,6 +24,7 @@ pub struct Settings {
     pub initial_prompt: String,
     pub max_recording_secs: u64,
     pub min_recording_ms: u64,
+    pub input_device: String,
 }
 
 impl Default for Settings {
@@ -37,6 +38,7 @@ impl Default for Settings {
             initial_prompt: DEFAULT_INITIAL_PROMPT.to_string(),
             max_recording_secs: DEFAULT_MAX_RECORDING_SECS,
             min_recording_ms: DEFAULT_MIN_RECORDING_MS,
+            input_device: String::new(),
         }
     }
 }

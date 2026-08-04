@@ -65,6 +65,7 @@ impl Sounds {
 pub enum Chime {
     RecordStart,
     PasteDone,
+    Error,
 }
 
 impl Chime {
@@ -78,6 +79,11 @@ impl Chime {
             Chime::PasteDone => {
                 let mut out = tone(880.0, 0.15, 0.35);
                 out.extend(tone(587.0, 0.2, 0.3));
+                out
+            }
+            Chime::Error => {
+                let mut out = tone(330.0, 0.15, 0.3);
+                out.extend(tone(220.0, 0.25, 0.25));
                 out
             }
         }

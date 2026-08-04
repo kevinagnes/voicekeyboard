@@ -101,5 +101,5 @@ synthesis, registry parsing, and SHA-256 verification.
 
 - [x] M1 — macOS core (hotkey hold/release, record, turbo model, paste, chimes)
 - [x] M2 — UX shell (menu bar, tray status, settings, secure-field guard, launch at login)
-- [ ] M3 — Ship-ready macOS (signing + notarization, DMG) — needs an Apple Developer account
+- [x] M3 — Ship-ready macOS (signing + notarization, DMG) — needs an Apple Developer account
 - [ ] M4 — Windows port (tray, hotkey + paste parity, installer)

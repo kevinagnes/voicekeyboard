@@ -70,6 +70,11 @@ pub struct HotkeyController {
     current: Option<HotKey>,
 }
 
+// On Windows GlobalHotKeyManager holds a raw HWND whose register/unregister/drop
+// are thread-safe Win32 calls; global-hotkey declares the manager Send on macOS
+// (same rationale), but omits the impl on Windows, which breaks Arc<AppState>.
+unsafe impl Send for HotkeyController {}
+
 impl HotkeyController {
     pub fn new() -> Result<Self, HotkeyError> {
         let manager =

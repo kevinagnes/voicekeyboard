@@ -5,6 +5,32 @@ use std::sync::Arc;
 
 pub const SAMPLE_RATE: u32 = 16_000;
 
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|devices| {
+            devices
+                .filter_map(|d| d.name().ok().map(|n| n.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn find_input_device(name: &str) -> Option<cpal::Device> {
+    if name.is_empty() {
+        return cpal::default_host().default_input_device();
+    }
+    let host = cpal::default_host();
+    host.input_devices()
+        .ok()
+        .and_then(|devices| {
+            devices
+                .filter_map(|d| d.name().ok().map(|n| (n, d)))
+                .find(|(n, _)| n == name)
+                .map(|(_, d)| d)
+        })
+}
+
 pub struct RingBuffer {
     data: Vec<f32>,
     capacity: usize,
@@ -99,7 +125,7 @@ pub struct AudioRecorder {
 }
 
 impl AudioRecorder {
-    pub fn new(max_recording_secs: u64) -> Result<Self, anyhow::Error> {
+    pub fn new(max_recording_secs: u64, device_name: &str) -> Result<Self, anyhow::Error> {
         let ring = Arc::new(Mutex::new(RingBuffer::new(max_recording_secs)));
         let capturing = Arc::new(AtomicBool::new(false));
         let level = Arc::new(AtomicU32::new(0));
@@ -109,6 +135,7 @@ impl AudioRecorder {
         let capturing_cb = capturing.clone();
         let level_cb = level.clone();
         let running_cb = running.clone();
+        let device_name = device_name.to_string();
         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
 
         std::thread::Builder::new()
@@ -117,7 +144,7 @@ impl AudioRecorder {
                 // Keep the stream alive for the lifetime of this thread: a dropped
                 // cpal::Stream stops the microphone. The thread polls `running` and
                 // exits when the recorder is dropped.
-                match build_stream(ring_cb, capturing_cb, level_cb) {
+                match build_stream(ring_cb, capturing_cb, level_cb, &device_name) {
                     Ok(stream) => {
                         if let Err(e) = stream.play() {
                             let _ = tx.send(Err(format!("failed to start microphone: {e}")));
@@ -179,11 +206,10 @@ fn build_stream(
     ring: Arc<Mutex<RingBuffer>>,
     capturing: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
+    device_name: &str,
 ) -> Result<cpal::Stream, String> {
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| "no default input device found".to_string())?;
+    let device = find_input_device(device_name)
+        .ok_or_else(|| "no input device found".to_string())?;
     let config = device.default_input_config().map_err(|e| e.to_string())?;
     let channels = config.channels();
     let sample_rate = config.sample_rate().0;

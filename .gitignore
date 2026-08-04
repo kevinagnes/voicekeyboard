@@ -2,6 +2,9 @@
 target/
 **/*.rs.bk
 
+# Local cargo config (machine-specific paths, SIMD flags)
+src-tauri/.cargo/
+
 # Build artifacts
 dist/
 

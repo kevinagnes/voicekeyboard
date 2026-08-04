@@ -32,6 +32,13 @@
       </section>
 
       <section class="card">
+        <h2>Microphone</h2>
+        <select id="inputDevice">
+          <option value="">System default</option>
+        </select>
+      </section>
+
+      <section class="card">
         <h2>Language</h2>
         <select id="language">
           <option value="auto">Auto-detect</option>
@@ -71,6 +78,23 @@
           <label>Max recording (s)
             <input id="maxSecs" type="number" min="30" max="600" step="10" />
           </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Performance</h2>
+        <div class="stats" id="stats">
+          <div class="stat"><span class="stat-label">Total runs:</span> <span id="statRuns">—</span></div>
+          <div class="stat"><span class="stat-label">Avg inference:</span> <span id="statAvgMs">—</span></div>
+          <div class="stat"><span class="stat-label">Total time:</span> <span id="statTotalMs">—</span></div>
+          <div class="stat"><span class="stat-label">Avg segments:</span> <span id="statAvgSegs">—</span></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Recent Transcriptions</h2>
+        <div id="recentList" class="recent-list">
+          <div class="hint">No transcriptions yet.</div>
         </div>
       </section>
 
