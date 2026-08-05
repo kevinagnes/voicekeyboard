@@ -103,11 +103,53 @@ pub fn focused_is_text_input() -> bool {
     use objc2_app_kit::NSWorkspace;
     use std::time::Duration as StdDuration;
 
+    const TEXT_ROLES: [&str; 7] = [
+        "AXTextField",
+        "AXTextArea",
+        "AXComboBox",
+        "AXSearchField",
+        "AXWebArea",
+        "AXTextAreaContainer",
+        "AXGroup", // Chromium/Electron editors (VS Code) often stop here
+    ];
+
+    fn role_is_text_input(el: &AXUIElement) -> bool {
+        let mut current = Some(el.clone());
+        while let Some(node) = current {
+            if let Ok(role) = node.role() {
+                if TEXT_ROLES.iter().any(|r| role == *r) {
+                    return true;
+                }
+            }
+            current = node.parent().ok();
+        }
+        false
+    }
+
     let workspace = NSWorkspace::sharedWorkspace();
     let Some(app) = workspace.frontmostApplication() else {
         return false;
     };
     let app_el = AXUIElement::application(app.processIdentifier());
+
+    // Preferred: the app-reported focused element. Chromium apps (VS Code,
+    // Slack, Electron) do NOT mark elements inside their webview as focused,
+    // so an in-window search finds nothing — but the app-level
+    // kAXFocusedUIElementAttribute is accurate.
+    use core_foundation::base::TCFType;
+    let attr = accessibility::AXAttribute::<core_foundation::base::CFType>::new(
+        &core_foundation::string::CFString::from_static_string("AXFocusedUIElement"),
+    );
+    if let Ok(cf) = app_el.attribute(&attr) {
+        let raw = cf.as_CFTypeRef();
+        // The CFType owns a reference; wrap with a retain so both can drop.
+        let el: AXUIElement = unsafe { TCFType::wrap_under_get_rule(raw as *mut _) };
+        if role_is_text_input(&el) {
+            return true;
+        }
+    }
+
+    // Fallback: search the focused window for a focused element (native apps).
     let Ok(window) = app_el.focused_window() else {
         return false;
     };
@@ -116,26 +158,8 @@ pub fn focused_is_text_input() -> bool {
         |el| el.focused().is_ok_and(bool::from),
         Some(StdDuration::from_millis(200)),
     );
-    let Ok(focused) = finder.find() else {
-        return false;
-    };
-
-    let text_roles = [
-        "AXTextField",
-        "AXTextArea",
-        "AXComboBox",
-        "AXSearchField",
-        "AXWebArea",
-        "AXTextAreaContainer",
-    ];
-    let mut current = Some(focused);
-    while let Some(el) = current {
-        if let Ok(role) = el.role() {
-            if text_roles.iter().any(|r| role == *r) {
-                return true;
-            }
-        }
-        current = el.parent().ok();
+    if let Ok(focused) = finder.find() {
+        return role_is_text_input(&focused);
     }
     false
 }
