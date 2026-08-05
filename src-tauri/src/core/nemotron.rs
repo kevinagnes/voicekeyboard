@@ -304,7 +304,7 @@ impl NemotronEngine {
         if i < samples.len() {
             let mut chunk = samples[i..].to_vec();
             chunk.resize(win_samples, 0.0);
-            carry = self.mel.lock().preemphasize(&mut chunk, carry);
+            let _ = self.mel.lock().preemphasize(&mut chunk, carry);
             text.push_str(&stream.run_window(&chunk)?);
         }
 
