@@ -29,7 +29,7 @@ pub const EVT_UPDATE_PROGRESS: &str = "update-download-progress";
 
 const TRAY_ID: &str = "main";
 const OVERLAY_ID: &str = "recording-overlay";
-const OVERLAY_W: f64 = 300.0;
+const OVERLAY_W: f64 = 380.0;
 const OVERLAY_H: f64 = 64.0;
 const OVERLAY_BOTTOM_MARGIN: f64 = 72.0;
 

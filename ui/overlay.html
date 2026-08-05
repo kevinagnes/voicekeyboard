@@ -42,12 +42,14 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        flex: 0 1 auto;
         min-width: 0;
       }
       canvas {
         display: block;
         height: 34px;
-        flex: 1 1 auto;
+        width: 0;
+        flex: 1 1 0;
         min-width: 0;
       }
       @keyframes pulse {
