@@ -1,11 +1,8 @@
-use std::time::Duration;
-
-pub const CLIPBOARD_RESTORE_DELAY: Duration = Duration::from_secs(1);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PasteOutcome {
     pub pasted: bool,
     pub skipped_secure: bool,
+    pub no_focused_input: bool,
 }
 
 pub fn sanitize(text: &str) -> String {
@@ -97,12 +94,64 @@ pub fn focused_is_secure() -> bool {
     false
 }
 
+/// Whether the currently focused element accepts text input (text field,
+/// text area, combo box, search field, or a web/text container). Used to
+/// detect a paste that would go nowhere.
+#[cfg(target_os = "macos")]
+pub fn focused_is_text_input() -> bool {
+    use accessibility::{AXUIElement, AXUIElementAttributes, ElementFinder};
+    use objc2_app_kit::NSWorkspace;
+    use std::time::Duration as StdDuration;
+
+    let workspace = NSWorkspace::sharedWorkspace();
+    let Some(app) = workspace.frontmostApplication() else {
+        return false;
+    };
+    let app_el = AXUIElement::application(app.processIdentifier());
+    let Ok(window) = app_el.focused_window() else {
+        return false;
+    };
+    let finder = ElementFinder::new(
+        &window,
+        |el| el.focused().is_ok_and(bool::from),
+        Some(StdDuration::from_millis(200)),
+    );
+    let Ok(focused) = finder.find() else {
+        return false;
+    };
+
+    let text_roles = [
+        "AXTextField",
+        "AXTextArea",
+        "AXComboBox",
+        "AXSearchField",
+        "AXWebArea",
+        "AXTextAreaContainer",
+    ];
+    let mut current = Some(focused);
+    while let Some(el) = current {
+        if let Ok(role) = el.role() {
+            if text_roles.iter().any(|r| role == *r) {
+                return true;
+            }
+        }
+        current = el.parent().ok();
+    }
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn focused_is_text_input() -> bool {
+    true
+}
+
 pub fn paste_text(text: &str) -> Result<PasteOutcome, String> {
     let cleaned = sanitize(text);
     if cleaned.is_empty() {
         return Ok(PasteOutcome {
             pasted: false,
             skipped_secure: false,
+            no_focused_input: false,
         });
     }
 
@@ -114,31 +163,29 @@ pub fn paste_text(text: &str) -> Result<PasteOutcome, String> {
         return Ok(PasteOutcome {
             pasted: false,
             skipped_secure: true,
+            no_focused_input: false,
         });
     }
 
+    // The text must be left in the clipboard regardless of paste outcome, so
+    // the user can always paste manually with Cmd/Ctrl+V.
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    let previous = clipboard.get_text().ok();
-
     clipboard.set_text(&cleaned).map_err(|e| e.to_string())?;
 
-    send_paste_keystroke()?;
-
-    if let Some(prev) = previous {
-        std::thread::Builder::new()
-            .name("clipboard-restore".into())
-            .spawn(move || {
-                std::thread::sleep(CLIPBOARD_RESTORE_DELAY);
-                if let Ok(mut cb) = arboard::Clipboard::new() {
-                    let _ = cb.set_text(prev);
-                }
-            })
-            .ok();
+    if !focused_is_text_input() {
+        return Ok(PasteOutcome {
+            pasted: false,
+            skipped_secure: false,
+            no_focused_input: true,
+        });
     }
+
+    send_paste_keystroke()?;
 
     Ok(PasteOutcome {
         pasted: true,
         skipped_secure: false,
+        no_focused_input: false,
     })
 }
 

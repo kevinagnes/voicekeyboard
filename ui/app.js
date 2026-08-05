@@ -23,9 +23,6 @@ async function refreshStatus() {
     } else if (status.busy) {
       el.className = "status busy";
       el.textContent = "Transcribing…";
-    } else if (!status.model_loaded) {
-      el.className = "status";
-      el.textContent = "Model not downloaded";
     } else {
       el.className = "status ok";
       el.textContent = `Ready — hold ${status.hotkey} to record`;
@@ -75,7 +72,7 @@ async function refreshPermissions() {
       missing: micText,
     },
     {
-      label: "Accessibility (paste + password detection)",
+      label: "Accessibility (auto-paste)",
       ok: p.accessibilityTrusted,
       missing: "Not granted — open System Settings → Privacy & Security → Accessibility and enable VoiceKeyboard.",
     },

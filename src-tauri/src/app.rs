@@ -387,14 +387,21 @@ fn copy_to_clipboard(text: &str) -> bool {
 
 /// Handle a paste that failed: put the text on the clipboard, play the error
 /// chime, and notify the user that they can paste manually.
-fn handle_paste_failure(app: &AppHandle, state: &AppState, text: &str, error: &str) {
-    debug_log(&format!("paste: failed -> {error}"));
+fn handle_paste_failure(app: &AppHandle, state: &AppState, text: &str, reason: &str) {
+    debug_log(&format!("paste: failed -> {reason}"));
     let copied = copy_to_clipboard(text);
     state.sounds.play(sounds::Chime::Error);
     let message = if copied {
-        "Failed to paste — text is on your clipboard, paste it with Cmd/Ctrl+V".to_string()
+        match reason {
+            "no input field is focused" => {
+                "Nothing is focused — transcript copied to clipboard, paste with Cmd/Ctrl+V".to_string()
+            }
+            _ => format!(
+                "Failed to paste ({reason}) — text copied to clipboard, paste with Cmd/Ctrl+V"
+            ),
+        }
     } else {
-        format!("Failed to paste: {error}")
+        format!("Failed to paste: {reason}")
     };
     let _ = app.emit(EVT_PASTE_FAILED, message.clone());
     // Native notification banner (on the main thread).
@@ -480,6 +487,14 @@ fn spawn_stt_worker(app: AppHandle, state: Arc<AppState>, rx: mpsc::Receiver<Job
                                             debug_log("paste: skipped (secure field)");
                                             let _ = app.emit(EVT_SECURE_SKIPPED, ());
                                             hide_overlay_delayed(&app, std::time::Duration::from_millis(900));
+                                        }
+                                        Ok(outcome) if outcome.no_focused_input => {
+                                            handle_paste_failure(
+                                                &app,
+                                                &state,
+                                                &transcription.text,
+                                                "no input field is focused",
+                                            );
                                         }
                                         Ok(_) => {
                                             debug_log("paste: no-op (empty)");

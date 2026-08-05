@@ -14,8 +14,7 @@
     </header>
 
     <nav class="tabs" id="tabs">
-      <button class="tab active" data-tab="setup">Get started</button>
-      <button class="tab" data-tab="general">General</button>
+      <button class="tab active" data-tab="setup">Setup</button>
       <button class="tab" data-tab="activity">Activity</button>
       <button class="tab" data-tab="analytics">Analytics</button>
       <button class="tab" data-tab="updates">Updates</button>
@@ -55,9 +54,7 @@
           </div>
           <div id="hotkeyHint" class="hint"></div>
         </section>
-      </section>
 
-      <section id="tab-general" class="tab-panel" hidden>
         <section class="card">
           <h2>Microphone</h2>
           <select id="inputDevice">
@@ -97,6 +94,11 @@
             </label>
           </div>
         </section>
+
+        <div class="actions">
+          <button id="save" class="primary">Save settings</button>
+          <span id="saved" class="saved" hidden>Saved ✓</span>
+        </div>
       </section>
 
       <section id="tab-activity" class="tab-panel" hidden>
@@ -144,11 +146,6 @@
           <p id="updateNotes" class="hint" hidden></p>
         </section>
       </section>
-
-      <div class="actions">
-        <button id="save" class="primary">Save settings</button>
-        <span id="saved" class="saved" hidden>Saved ✓</span>
-      </div>
     </main>
 
     <script src="app.js"></script>
