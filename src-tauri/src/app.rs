@@ -221,6 +221,7 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "settings" => open_settings(app),
+                    "about" => open_about(app),
                     "check-updates" => {
                         if let Some(state) = app.try_state::<Arc<AppState>>() {
                             if state.update.lock().is_some() {
@@ -697,8 +698,9 @@ fn build_menu(app: &AppHandle, state: &AppState) -> tauri::Result<tauri::menu::M
     };
     let status = MenuItem::with_id(app, "status", status_text, false, None::<&str>)?;
     let open = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
+    let about = MenuItem::with_id(app, "about", "About VoiceKeyboard…", true, None::<&str>)?;
     let quit = PredefinedMenuItem::quit(app, Some("Quit VoiceKeyboard"))?;
-    Menu::with_items(app, &[&status, &open, &quit])
+    Menu::with_items(app, &[&status, &open, &about, &quit])
 }
 
 fn open_settings(app: &AppHandle) {
@@ -711,6 +713,29 @@ fn open_settings(app: &AppHandle) {
         .title("VoiceKeyboard")
         .inner_size(560.0, 720.0)
         .resizable(true)
+        .build();
+    if let Ok(win) = win {
+        let handle = win.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = handle.hide();
+            }
+        });
+        let _ = win.set_focus();
+    }
+}
+
+fn open_about(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("about") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+    let win = WebviewWindowBuilder::new(app, "about", WebviewUrl::App("about.html".into()))
+        .title("About VoiceKeyboard")
+        .inner_size(380.0, 460.0)
+        .resizable(false)
         .build();
     if let Ok(win) = win {
         let handle = win.clone();

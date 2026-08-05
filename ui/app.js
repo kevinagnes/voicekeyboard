@@ -175,6 +175,8 @@ async function refreshUpdateStatus() {
   try {
     const u = await invoke("get_update_status");
     $("version").textContent = u.current_version || "";
+    const av = $("aboutVersionSettings");
+    if (av) av.textContent = u.current_version || "";
     $("checkUpdates").disabled = u.checking || u.installing;
     $("installUpdate").disabled = u.checking || u.installing;
     if (u.installing) {

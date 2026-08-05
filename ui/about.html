@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>About VoiceKeyboard</title>
+    <link rel="stylesheet" href="style.css" />
+    <style>
+      body {
+        background: var(--bg);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        padding: 24px;
+        box-sizing: border-box;
+        text-align: center;
+      }
+      .app-icon {
+        width: 72px;
+        height: 72px;
+        border-radius: 16px;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+        margin-bottom: 12px;
+      }
+      h1 {
+        margin: 0 0 2px;
+        font-size: 20px;
+      }
+      .version {
+        color: var(--muted);
+        font-size: 13px;
+        margin-bottom: 14px;
+      }
+      .desc {
+        color: var(--text);
+        font-size: 13.5px;
+        line-height: 1.5;
+        max-width: 300px;
+        margin-bottom: 16px;
+      }
+      .contact {
+        font-size: 13px;
+        color: var(--accent);
+        margin-bottom: 20px;
+      }
+      .contact a {
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 600;
+      }
+      .privacy {
+        font-size: 12px;
+        color: var(--muted);
+        max-width: 280px;
+        line-height: 1.45;
+      }
+    </style>
+  </head>
+  <body>
+    <img class="app-icon" src="icon.png" alt="VoiceKeyboard" />
+    <h1>VoiceKeyboard</h1>
+    <div class="version">Version <span id="aboutVersion">…</span></div>
+    <p class="desc">
+      Hold a hotkey, speak, release — and the transcript is pasted into the
+      focused field. 100% on-device speech recognition. No audio ever leaves
+      your machine.
+    </p>
+    <div class="contact">
+      Need help or have feedback?
+      <a href="mailto:developer@xr.dev.br">developer@xr.dev.br</a>
+    </div>
+    <p class="privacy">
+      Local, offline dictation. Records only while the hotkey is held. No
+      telemetry, no transcripts logged.
+    </p>
+    <script src="about.js"></script>
+  </body>
+</html>
