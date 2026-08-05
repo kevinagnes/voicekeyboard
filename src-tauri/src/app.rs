@@ -147,6 +147,7 @@ pub struct PermissionsDto {
     pub accessibility_trusted: bool,
     pub has_input_device: bool,
     pub mic_permission: String,
+    pub running_from_bundle: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -199,6 +200,7 @@ pub fn run() {
             get_audio_level,
             request_accessibility,
             request_microphone,
+            open_mic_settings,
             get_inference_stats,
             get_input_devices,
             get_recent_transcriptions,
@@ -895,6 +897,14 @@ fn get_settings(state: State<'_, Arc<AppState>>) -> settings::Settings {
 
 #[tauri::command]
 fn get_permissions(state: State<'_, Arc<AppState>>) -> PermissionsDto {
+    // If the user granted mic access (e.g. fixed it in System Settings after
+    // the app was denied/undetermined), rebuild the recorder so the device
+    // becomes available.
+    if mic::mic_permission() == mic::MicPermission::Authorized
+        && state.recorder.lock().is_none()
+    {
+        rebuild_recorder(state.inner());
+    }
     PermissionsDto {
         accessibility_trusted: paste::accessibility_trusted(),
         has_input_device: state.recorder.lock().is_some(),
@@ -903,6 +913,7 @@ fn get_permissions(state: State<'_, Arc<AppState>>) -> PermissionsDto {
             mic::MicPermission::Denied => "denied".into(),
             mic::MicPermission::NotDetermined => "notDetermined".into(),
         },
+        running_from_bundle: mic::running_from_bundle(),
     }
 }
 
@@ -923,12 +934,34 @@ fn request_microphone(app: AppHandle, state: State<'_, Arc<AppState>>) -> String
     if status == mic::MicPermission::Authorized {
         rebuild_recorder(state.inner());
         let _ = app.emit(EVT_SETTINGS_CHANGED, ());
+    } else if status == mic::MicPermission::NotDetermined {
+        // Prompt now showing; the settings UI polls get_permissions and will
+        // see the answer when the user responds. Also watch for it here so
+        // the recorder is rebuilt as soon as it is granted.
+        let handle = app.clone();
+        let state2 = state.inner().clone();
+        std::thread::spawn(move || {
+            for _ in 0..30 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if mic::mic_permission() == mic::MicPermission::Authorized {
+                    debug_log("mic: granted while waiting");
+                    rebuild_recorder(&state2);
+                    let _ = handle.emit(EVT_SETTINGS_CHANGED, ());
+                    break;
+                }
+            }
+        });
     }
     match status {
         mic::MicPermission::Authorized => "authorized".into(),
         mic::MicPermission::Denied => "denied".into(),
         mic::MicPermission::NotDetermined => "notDetermined".into(),
     }
+}
+
+#[tauri::command]
+fn open_mic_settings() {
+    mic::open_mic_settings();
 }
 
 fn rebuild_recorder(state: &AppState) {

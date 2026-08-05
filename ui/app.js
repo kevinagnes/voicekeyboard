@@ -49,16 +49,21 @@ async function refreshPermissions() {
   const p = await invoke("get_permissions");
   const list = $("permissions");
   list.innerHTML = "";
+  const micStatus = p.micPermission;
   const micLabels = {
     authorized: "granted",
     denied: "denied — open System Settings → Privacy & Security → Microphone and enable VoiceKeyboard.",
     notDetermined: "not requested — click “Request Microphone…”",
   };
+  let micText = micLabels[micStatus] || micLabels.notDetermined;
+  if (!p.runningFromBundle && micStatus !== "authorized") {
+    micText += " Note: run the installed VoiceKeyboard.app, not the raw binary.";
+  }
   const items = [
     {
       label: "Microphone",
-      ok: p.micPermission === "authorized",
-      missing: micLabels[p.micPermission] || micLabels.notDetermined,
+      ok: micStatus === "authorized",
+      missing: micText,
     },
     {
       label: "Accessibility (paste + password detection)",
@@ -80,7 +85,20 @@ async function refreshPermissions() {
     li.appendChild(span);
     list.appendChild(li);
   }
-  $("requestMicrophone").disabled = p.micPermission === "authorized";
+  const micBtn = $("requestMicrophone");
+  const openBtn = $("openMicSettings");
+  if (micStatus === "denied") {
+    micBtn.hidden = true;
+    openBtn.hidden = false;
+  } else if (micStatus === "notDetermined") {
+    micBtn.hidden = false;
+    micBtn.disabled = false;
+    micBtn.textContent = "Request Microphone…";
+    openBtn.hidden = true;
+  } else {
+    micBtn.hidden = true;
+    openBtn.hidden = true;
+  }
 }
 
 async function refreshStats() {
@@ -372,13 +390,25 @@ async function init() {
       if (result === "authorized") {
         addActivity("Microphone access granted", "ok");
       } else if (result === "denied") {
-        addActivity("Microphone access denied — enable it in System Settings", "warn");
+        addActivity("Microphone access is denied — open System Settings to enable it", "warn");
+        micButton.disabled = false;
+        micButton.textContent = "Request Microphone…";
+      } else {
+        addActivity("Microphone permission prompt shown — check for the system dialog", "info");
       }
     } catch (e) {
       addActivity(`Microphone request failed: ${e}`, "err");
     }
-    micButton.textContent = "Request Microphone…";
     await refreshPermissions();
+  });
+
+  const openMicButton = $("openMicSettings");
+  openMicButton.addEventListener("click", async () => {
+    try {
+      await invoke("open_mic_settings");
+    } catch (e) {
+      addActivity(`Failed to open System Settings: ${e}`, "err");
+    }
   });
 
   const accButton = $("requestAccessibility");
