@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for the settings window",
-  "windows": ["settings", "recording-overlay"],
+  "windows": ["settings", "recording-overlay", "about"],
   "permissions": ["core:default"]
 }
