@@ -1,6 +1,6 @@
 {
   "$schema": "VoiceKeyboard model registry",
-  "comment": "Add future models here (id, name, filename, URL, optional sha256 checksum). Empty checksum skips verification with a warning.",
+  "comment": "Add future models here. Empty checksum skips verification with a warning. Models with a `files` array are multi-file ONNX bundles (engine: nemotron); single-file entries are whisper.cpp GGML models (engine: whisper).",
   "models": [
     {
       "id": "large-v3-turbo",
@@ -11,6 +11,7 @@
       "checksumSha256": "",
       "sizeBytes": 1621397120,
       "default": true,
+      "engine": "whisper",
       "languages": ["auto", "en", "pt"]
     },
     {
@@ -22,7 +23,61 @@
       "checksumSha256": "",
       "sizeBytes": 475226752,
       "default": false,
+      "engine": "whisper",
       "languages": ["auto", "en", "pt"]
+    },
+    {
+      "id": "nemotron-multilingual",
+      "name": "Nemotron 3.5 Multilingual (0.6B, INT8)",
+      "description": "NVIDIA streaming ASR. 100+ languages, strong low-resource support, better punctuation. ~755 MB total (7 files).",
+      "filename": "encoder.onnx",
+      "url": "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-INT8/resolve/main/encoder.onnx",
+      "checksumSha256": "",
+      "sizeBytes": 755157638,
+      "default": false,
+      "engine": "nemotron",
+      "languages": [
+        "auto", "en", "es", "pt", "fr", "de", "it", "nl", "pl", "tr",
+        "ru", "uk", "ja", "ko", "zh", "hi", "ar", "he", "sv", "da",
+        "fi", "no", "cs", "hu", "ro", "el", "th", "vi", "id", "ms"
+      ],
+      "files": [
+        {
+          "filename": "encoder.onnx",
+          "url": "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-INT8/resolve/main/encoder.onnx",
+          "sizeBytes": 657558932
+        },
+        {
+          "filename": "decoder.onnx",
+          "url": "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-INT8/resolve/main/decoder.onnx",
+          "sizeBytes": 4345
+        },
+        {
+          "filename": "decoder.onnx.data",
+          "url": "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-INT8/resolve/main/decoder.onnx.data",
+          "sizeBytes": 59760640
+        },
+        {
+          "filename": "joint.onnx",
+          "url": "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-INT8/resolve/main/joint.onnx",
+          "sizeBytes": 2023
+        },
+        {
+          "filename": "joint.onnx.data",
+          "url": "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-INT8/resolve/main/joint.onnx.data",
+          "sizeBytes": 37822592
+        },
+        {
+          "filename": "vocab.json",
+          "url": "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-INT8/resolve/main/vocab.json",
+          "sizeBytes": 236127
+        },
+        {
+          "filename": "languages.json",
+          "url": "https://huggingface.co/soniqo/Nemotron-3.5-ASR-Streaming-Multilingual-0.6B-ONNX-INT8/resolve/main/languages.json",
+          "sizeBytes": 2020
+        }
+      ]
     }
   ]
 }

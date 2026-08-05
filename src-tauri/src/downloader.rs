@@ -31,6 +31,18 @@ pub fn is_valid_model_file(path: &Path) -> bool {
     file.read_exact(&mut magic).is_ok() && &magic == GGML_MAGIC
 }
 
+/// Generic validity: exists and (optionally) matches the expected byte size.
+/// Used for ONNX bundles and JSON sidecar files where there is no magic.
+pub fn is_valid_download(path: &Path, expected_size: u64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if expected_size > 0 {
+        return meta.len() == expected_size;
+    }
+    meta.len() > 0
+}
+
 impl Downloader {
     pub fn new() -> Self {
         let client = reqwest::blocking::Client::builder()
@@ -98,6 +110,79 @@ impl Downloader {
         std::fs::rename(&part, dest).map_err(|e| e.to_string())?;
         progress(1, 1);
         Ok(())
+    }
+
+    /// Download a single file without whisper-specific validation (used for
+    /// ONNX bundle members and sidecars). Resumes partial downloads.
+    pub fn download_raw<F>(&self, url: &str, dest: &Path, mut progress: F) -> Result<(), String>
+    where
+        F: FnMut(u64, u64),
+    {
+        let parent = dest.parent().ok_or("invalid destination path")?;
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+
+        if is_valid_download(dest, 0) {
+            progress(1, 1);
+            return Ok(());
+        }
+
+        let part: PathBuf = {
+            let mut p = dest.as_os_str().to_os_string();
+            p.push(".part");
+            p.into()
+        };
+
+        for attempt in 0..=MAX_RETRIES {
+            match self.try_download(url, &part, &mut progress) {
+                Ok(()) => break,
+                Err(e) => {
+                    if attempt == MAX_RETRIES {
+                        return Err(format!("download failed after {} attempts: {e}", MAX_RETRIES + 1));
+                    }
+                    let delay = BACKOFF_BASE_MS * 2u64.pow(attempt);
+                    std::thread::sleep(Duration::from_millis(delay));
+                }
+            }
+        }
+
+        std::fs::rename(&part, dest).map_err(|e| e.to_string())?;
+        progress(1, 1);
+        Ok(())
+    }
+
+    /// Download a multi-file bundle (ONNX models etc.) into `dir`, reporting
+    /// cumulative progress across all files. Skips files already present with
+    /// the expected size. Returns the list of absolute paths in order.
+    pub fn download_bundle<F>(
+        &self,
+        dir: &Path,
+        files: &[(String, String, u64)],
+        mut progress: F,
+    ) -> Result<Vec<std::path::PathBuf>, String>
+    where
+        F: FnMut(u64, u64),
+    {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let total: u64 = files.iter().map(|(_, _, size)| *size).sum();
+        let mut done = 0u64;
+        let mut out = Vec::with_capacity(files.len());
+
+        for (filename, url, size) in files {
+            let dest = dir.join(filename);
+            if !is_valid_download(&dest, *size) {
+                let d = done;
+                let cell = std::cell::RefCell::new(&mut progress);
+                self.download_raw(url, &dest, move |file_done, file_total| {
+                    let merged = d + if file_total > 0 { file_done } else { 0 };
+                    cell.borrow_mut()(merged.min(total), total);
+                })
+                .map_err(|e| format!("{filename}: {e}"))?;
+            }
+            done += *size;
+            out.push(dest);
+            progress(done.min(total), total);
+        }
+        Ok(out)
     }
 
     fn try_download<F>(&self, url: &str, part: &Path, progress: &mut F) -> Result<(), String>

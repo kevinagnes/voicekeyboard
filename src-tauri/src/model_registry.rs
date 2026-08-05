@@ -14,6 +14,22 @@ pub struct ModelInfo {
     pub size_bytes: u64,
     pub default: bool,
     pub languages: Vec<String>,
+    #[serde(default = "default_engine")]
+    pub engine: String,
+    #[serde(default)]
+    pub files: Vec<ModelFile>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelFile {
+    pub filename: String,
+    pub url: String,
+    pub size_bytes: u64,
+}
+
+fn default_engine() -> String {
+    "whisper".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -436,8 +436,16 @@ fn spawn_stt_worker(app: AppHandle, state: Arc<AppState>, rx: mpsc::Receiver<Job
             while let Ok(job) = rx.recv() {
                 match job {
                     Job::LoadModel(path) => {
-                        let id = state.settings.lock().model_id.clone();
-                        match state.stt.load_model(&path.to_string_lossy()) {
+                        let (id, engine) = {
+                            let s = state.settings.lock();
+                            let engine = state
+                                .registry
+                                .find(&s.model_id)
+                                .map(|m| m.engine.clone())
+                                .unwrap_or_else(|| "whisper".to_string());
+                            (s.model_id.clone(), engine)
+                        };
+                        match state.stt.load_model(&path.to_string_lossy(), &engine) {
                             Ok(()) => {
                                 state.model_loaded.store(true, Ordering::SeqCst);
                                 let _ = app.emit(EVT_MODEL_LOADED, &id);
@@ -535,19 +543,15 @@ fn spawn_model_loader(app: AppHandle, state: Arc<AppState>) {
                 let s = state.settings.lock();
                 (s.model_id.clone(), state.registry.resolve_path(&s.model_id))
             };
-            match path {
-                Some(path) if path.exists() && is_valid_model_file(&path) => {
-                    enqueue_load(&state, path)
-                }
-                Some(path) if path.exists() => {
-                    debug_log(&format!(
-                        "model: {} is corrupt — deleting and re-downloading",
-                        path.display()
-                    ));
-                    let _ = std::fs::remove_file(&path);
+            if model_is_valid(&state, &id) {
+                if let Some(path) = path {
+                    enqueue_load(&state, path);
+                } else {
                     start_download(&app, &state, &id);
                 }
-                Some(_) | None => start_download(&app, &state, &id),
+            } else {
+                debug_log(&format!("model: {} not fully present — downloading", id));
+                start_download(&app, &state, &id);
             }
         })
         .expect("failed to spawn model loader");
@@ -667,9 +671,17 @@ fn on_released(app: &AppHandle, state: &Arc<AppState>) {
     state.busy.store(true, Ordering::SeqCst);
     update_tray(app, state);
 
+    // Whisper accepts only a small set of language codes; the Nemotron engine
+    // accepts the full dropdown (en, pt, es, fr, ja, …) via its prompt slots.
+    let engine_kind = state
+        .registry
+        .find(&state.settings.lock().model_id)
+        .map(|m| m.engine.clone())
+        .unwrap_or_else(|| "whisper".to_string());
     let language = match language.as_str() {
-        "en" => Some("en".to_string()),
-        "pt" => Some("pt".to_string()),
+        "auto" | "" => None,
+        code if engine_kind == "nemotron" => Some(code.to_string()),
+        "en" | "pt" => Some(language),
         _ => None,
     };
     if let Some(tx) = state.job_tx.lock().as_ref() {
@@ -1110,18 +1122,34 @@ fn apply_settings(
 
     let active = state.registry.resolve_path(&s.model_id);
     if state.stt.model_path() != active {
-        match active {
-            Some(path) if path.exists() && is_valid_model_file(&path) => {
-                enqueue_load(state, path)
+        if model_is_valid(state, &s.model_id) {
+            if let Some(path) = active {
+                enqueue_load(state, path);
             }
-            Some(path) if path.exists() => {
-                let _ = std::fs::remove_file(&path);
-                start_download(app, state, &s.model_id);
-            }
-            _ => start_download(app, state, &s.model_id),
+        } else {
+            start_download(app, state, &s.model_id);
         }
     }
     update_tray(app, state);
+}
+
+/// True when the model is fully present on disk (single GGML file, or every
+/// file of a multi-file ONNX bundle).
+fn model_is_valid(state: &AppState, model_id: &str) -> bool {
+    let Some(model) = state.registry.find(model_id) else {
+        return false;
+    };
+    if model.files.is_empty() {
+        return state
+            .registry
+            .resolve_path(model_id)
+            .is_some_and(|p| is_valid_model_file(&p));
+    }
+    let dir = state.registry.download_dir();
+    model.files.iter().all(|f| {
+        use crate::downloader::is_valid_download;
+        is_valid_download(&dir.join(&f.filename), f.size_bytes)
+    })
 }
 
 fn start_download(app: &AppHandle, state: &Arc<AppState>, model_id: &str) {
@@ -1137,10 +1165,6 @@ fn start_download(app: &AppHandle, state: &Arc<AppState>, model_id: &str) {
         *state.downloading.lock() = None;
         return;
     };
-    let Some(dest) = state.registry.resolve_path(model_id) else {
-        *state.downloading.lock() = None;
-        return;
-    };
 
     let handle = app.clone();
     let state2 = state.clone();
@@ -1149,14 +1173,14 @@ fn start_download(app: &AppHandle, state: &Arc<AppState>, model_id: &str) {
     std::thread::Builder::new()
         .name("model-download".into())
         .spawn(move || {
-            debug_log(&format!("download: start {} -> {}", mid, dest.display()));
             let downloader = Downloader::new();
             let mut last_pct = u64::MAX;
-            let result = downloader.download(&model.url, &dest, &model.checksum_sha256, |done, total| {
-            let pct = done
-                .checked_mul(100)
-                .and_then(|d| d.checked_div(total))
-                .unwrap_or(0);
+
+            let progress = |done: u64, total: u64| {
+                let pct = done
+                    .checked_mul(100)
+                    .and_then(|d| d.checked_div(total))
+                    .unwrap_or(0);
                 if pct == last_pct {
                     return;
                 }
@@ -1173,13 +1197,43 @@ fn start_download(app: &AppHandle, state: &Arc<AppState>, model_id: &str) {
                     },
                 );
                 update_tray(&handle, &state2);
-            });
+            };
+
+            let dir = state2.registry.download_dir();
+            let result = if model.files.is_empty() {
+                debug_log(&format!(
+                    "download: start {} -> {}",
+                    mid,
+                    dir.join(&model.filename).display()
+                ));
+                downloader
+                    .download(
+                        &model.url,
+                        &dir.join(&model.filename),
+                        &model.checksum_sha256,
+                        progress,
+                    )
+                    .map(|_| dir.join(&model.filename))
+            } else {
+                debug_log(&format!("download: start bundle {} ({} files)", mid, model.files.len()));
+                let files: Vec<(String, String, u64)> = model
+                    .files
+                    .iter()
+                    .map(|f| (f.filename.clone(), f.url.clone(), f.size_bytes))
+                    .collect();
+                downloader.download_bundle(&dir, &files, progress).map(|paths| {
+                    paths
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| dir.join(&model.filename))
+                })
+            };
 
             *state2.downloading.lock() = None;
             *state2.download_progress.lock() = None;
 
             match result {
-                Ok(()) => {
+                Ok(dest) => {
                     debug_log(&format!("download: done {}", dest.display()));
                     let _ = handle.emit(
                         EVT_DOWNLOAD_PROGRESS,
@@ -1227,7 +1281,15 @@ fn get_models(state: State<'_, Arc<AppState>>) -> Vec<ModelStatusDto> {
         .iter()
         .map(|m| {
             let path = registry.resolve_path(&m.id);
-            let downloaded = path.as_ref().is_some_and(|p| p.exists());
+            let downloaded = if m.files.is_empty() {
+                path.as_ref().is_some_and(|p| p.exists())
+            } else {
+                let dir = registry.download_dir();
+                m.files.iter().all(|f| {
+                    use crate::downloader::is_valid_download;
+                    is_valid_download(&dir.join(&f.filename), f.size_bytes)
+                })
+            };
             ModelStatusDto {
                 id: m.id.clone(),
                 name: m.name.clone(),

@@ -210,6 +210,53 @@ async function refreshUpdateStatus() {
   }
 }
 
+const LANGUAGE_LABELS = {
+  auto: "Auto-detect",
+  en: "English",
+  pt: "Português (Brasil)",
+  es: "Español",
+  fr: "Français",
+  de: "Deutsch",
+  it: "Italiano",
+  nl: "Nederlands",
+  pl: "Polski",
+  tr: "Türkçe",
+  ru: "Русский",
+  uk: "Українська",
+  ja: "日本語",
+  ko: "한국어",
+  zh: "中文",
+  hi: "हिन्दी",
+  ar: "العربية",
+  he: "עברית",
+  sv: "Svenska",
+  da: "Dansk",
+  fi: "Suomi",
+  no: "Norsk",
+  cs: "Čeština",
+  hu: "Magyar",
+  ro: "Română",
+  el: "Ελληνικά",
+  th: "ไทย",
+  vi: "Tiếng Việt",
+  id: "Bahasa Indonesia",
+  ms: "Bahasa Melayu",
+};
+
+function fillLanguageSelect(languages) {
+  const sel = $("language");
+  sel.innerHTML = "";
+  for (const code of languages || ["auto", "en", "pt"]) {
+    const opt = document.createElement("option");
+    opt.value = code;
+    opt.textContent = LANGUAGE_LABELS[code] || code;
+    sel.appendChild(opt);
+  }
+  sel.value = state.settings.language && languages.includes(state.settings.language)
+    ? state.settings.language
+    : "auto";
+}
+
 async function refreshModels() {
   const models = await invoke("get_models");
   const container = $("models");
@@ -225,6 +272,7 @@ async function refreshModels() {
     radio.checked = m.active;
     radio.addEventListener("change", () => {
       state.settings.modelId = m.id;
+      fillLanguageSelect(m.languages);
       markDirty();
     });
 
@@ -276,6 +324,7 @@ async function refreshModels() {
 
     container.appendChild(row);
   }
+  return models;
 }
 
 const MODIFIER_CODES = new Set([
@@ -373,7 +422,6 @@ async function save() {
 async function init() {
   state.settings = await invoke("get_settings");
   $("hotkey").value = state.settings.hotkey;
-  $("language").value = state.settings.language;
   $("sounds").checked = state.settings.sounds;
   $("launchAtLogin").checked = state.settings.launchAtLogin;
   $("initialPrompt").value = state.settings.initialPrompt;
@@ -546,7 +594,9 @@ async function init() {
     addActivity(text, "err");
   });
 
-  await refreshModels();
+  const models = await refreshModels();
+  const activeModel = models.find((m) => m.active);
+  fillLanguageSelect(activeModel ? activeModel.languages : null);
   await refreshDevices();
   await refreshPermissions();
   await refreshUpdateStatus();

@@ -1,7 +1,10 @@
 use parking_lot::Mutex;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+use super::nemotron::NemotronEngine;
 
 #[derive(Debug, Clone)]
 pub struct Transcription {
@@ -20,8 +23,15 @@ pub struct InferenceStats {
     pub avg_segments: u64,
 }
 
+enum Backend {
+    Whisper {
+        ctx: Mutex<Option<WhisperContext>>,
+    },
+    Nemotron(Mutex<Option<NemotronEngine>>),
+}
+
 pub struct SttEngine {
-    ctx: Mutex<Option<WhisperContext>>,
+    backend: Mutex<Backend>,
     model_path: Mutex<Option<std::path::PathBuf>>,
     n_threads: usize,
     total_runs: AtomicU64,
@@ -38,7 +48,9 @@ impl Default for SttEngine {
 impl SttEngine {
     pub fn new() -> Self {
         Self {
-            ctx: Mutex::new(None),
+            backend: Mutex::new(Backend::Whisper {
+                ctx: Mutex::new(None),
+            }),
             model_path: Mutex::new(None),
             n_threads: std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -50,22 +62,35 @@ impl SttEngine {
     }
 
     pub fn is_loaded(&self) -> bool {
-        self.ctx.lock().is_some()
+        match &*self.backend.lock() {
+            Backend::Whisper { ctx } => ctx.lock().is_some(),
+            Backend::Nemotron(engine) => engine.lock().is_some(),
+        }
     }
 
     pub fn model_path(&self) -> Option<std::path::PathBuf> {
         self.model_path.lock().clone()
     }
 
-    pub fn load_model(&self, path: &str) -> Result<(), String> {
-        let params = WhisperContextParameters {
-            use_gpu: true,
-            flash_attn: true,
-            ..Default::default()
-        };
-        let ctx = WhisperContext::new_with_params(path, params)
-            .map_err(|e| format!("failed to load model \"{path}\": {e}"))?;
-        *self.ctx.lock() = Some(ctx);
+    pub fn load_model(&self, path: &str, engine_kind: &str) -> Result<(), String> {
+        match engine_kind {
+            "nemotron" => {
+                let engine = NemotronEngine::load(Path::new(path))?;
+                *self.backend.lock() = Backend::Nemotron(Mutex::new(Some(engine)));
+            }
+            _ => {
+                let params = WhisperContextParameters {
+                    use_gpu: true,
+                    flash_attn: true,
+                    ..Default::default()
+                };
+                let ctx = WhisperContext::new_with_params(path, params)
+                    .map_err(|e| format!("failed to load model \"{path}\": {e}"))?;
+                *self.backend.lock() = Backend::Whisper {
+                    ctx: Mutex::new(Some(ctx)),
+                };
+            }
+        }
         *self.model_path.lock() = Some(path.into());
         Ok(())
     }
@@ -76,55 +101,75 @@ impl SttEngine {
         language: Option<&str>,
         initial_prompt: &str,
     ) -> Result<Transcription, String> {
-        let mut guard = self.ctx.lock();
-        let ctx = guard.as_mut().ok_or("model not loaded")?;
-        let mut state = ctx.create_state().map_err(|e| e.to_string())?;
+        match &*self.backend.lock() {
+            Backend::Nemotron(engine) => {
+                let guard = engine.lock();
+                let engine = guard.as_ref().ok_or("model not loaded")?;
+                let start = Instant::now();
+                let result = engine.transcribe(samples, language)?;
+                let elapsed = start.elapsed().as_millis() as u64;
+                self.total_runs.fetch_add(1, Ordering::Relaxed);
+                self.total_ms.fetch_add(elapsed, Ordering::Relaxed);
+                let n_segments = result.text.split_whitespace().count() as i32;
+                self.total_segments.fetch_add(n_segments as u64, Ordering::Relaxed);
+                Ok(Transcription {
+                    text: result.text,
+                    language: result.language,
+                    inference_ms: elapsed,
+                    n_segments,
+                })
+            }
+            Backend::Whisper { ctx } => {
+                let mut guard = ctx.lock();
+                let ctx = guard.as_mut().ok_or("model not loaded")?;
+                let mut state = ctx.create_state().map_err(|e| e.to_string())?;
+                let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 0 });
+                params.set_n_threads(self.n_threads as i32);
+                params.set_language(language);
+                params.set_initial_prompt(initial_prompt);
+                params.set_translate(false);
+                params.set_no_context(true);
+                params.set_no_timestamps(true);
+                params.set_suppress_blank(true);
+                params.set_print_progress(false);
+                params.set_print_special(false);
+                params.set_print_realtime(false);
 
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 0 });
-        params.set_n_threads(self.n_threads as i32);
-        params.set_language(language);
-        params.set_initial_prompt(initial_prompt);
-        params.set_translate(false);
-        params.set_no_context(true);
-        params.set_no_timestamps(true);
-        params.set_suppress_blank(true);
-        params.set_print_progress(false);
-        params.set_print_special(false);
-        params.set_print_realtime(false);
+                let start = Instant::now();
+                state.full(params, samples).map_err(|e| e.to_string())?;
+                let elapsed = start.elapsed().as_millis() as u64;
 
-        let start = Instant::now();
-        state.full(params, samples).map_err(|e| e.to_string())?;
-        let elapsed = start.elapsed().as_millis() as u64;
-
-        let n = state.full_n_segments();
-        let mut text = String::new();
-        for i in 0..n {
-            if let Some(seg) = state.get_segment(i) {
-                if let Ok(seg) = seg.to_str() {
-                    text.push_str(seg);
+                let n = state.full_n_segments();
+                let mut text = String::new();
+                for i in 0..n {
+                    if let Some(seg) = state.get_segment(i) {
+                        if let Ok(seg) = seg.to_str() {
+                            text.push_str(seg);
+                        }
+                    }
                 }
+
+                let language = match state.full_lang_id_from_state() {
+                    id if id >= 0 => ctx
+                        .token_to_str(ctx.token_lang(id))
+                        .ok()
+                        .map(|s| s.trim_matches(|c| c == '<' || c == '|' || c == '>').to_string())
+                        .unwrap_or_else(|| "auto".to_string()),
+                    _ => "auto".to_string(),
+                };
+
+                self.total_runs.fetch_add(1, Ordering::Relaxed);
+                self.total_ms.fetch_add(elapsed, Ordering::Relaxed);
+                self.total_segments.fetch_add(n as u64, Ordering::Relaxed);
+
+                Ok(Transcription {
+                    text,
+                    language,
+                    inference_ms: elapsed,
+                    n_segments: n,
+                })
             }
         }
-
-        let language = match state.full_lang_id_from_state() {
-            id if id >= 0 => ctx
-                .token_to_str(ctx.token_lang(id))
-                .ok()
-                .map(|s| s.trim_matches(|c| c == '<' || c == '|' || c == '>').to_string())
-                .unwrap_or_else(|| "auto".to_string()),
-            _ => "auto".to_string(),
-        };
-
-        self.total_runs.fetch_add(1, Ordering::Relaxed);
-        self.total_ms.fetch_add(elapsed, Ordering::Relaxed);
-        self.total_segments.fetch_add(n as u64, Ordering::Relaxed);
-
-        Ok(Transcription {
-            text,
-            language,
-            inference_ms: elapsed,
-            n_segments: n,
-        })
     }
 
     pub fn stats(&self) -> InferenceStats {
