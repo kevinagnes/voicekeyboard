@@ -162,7 +162,7 @@ impl AudioRecorder {
             })
             .map_err(|e| anyhow::anyhow!("failed to spawn audio thread: {e}"))?;
 
-        match rx.recv() {
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
             Ok(Ok(())) => Ok(Self {
                 ring,
                 capturing,
@@ -170,7 +170,7 @@ impl AudioRecorder {
                 running,
             }),
             Ok(Err(e)) => Err(anyhow::anyhow!(e)),
-            Err(_) => Err(anyhow::anyhow!("audio thread exited unexpectedly")),
+            Err(_) => Err(anyhow::anyhow!("audio thread did not start within 10s")),
         }
     }
 

@@ -87,17 +87,21 @@ async function refreshPermissions() {
   }
   const micBtn = $("requestMicrophone");
   const openBtn = $("openMicSettings");
+  const resetBtn = $("resetMicrophone");
   if (micStatus === "denied") {
     micBtn.hidden = true;
     openBtn.hidden = false;
+    resetBtn.hidden = false;
   } else if (micStatus === "notDetermined") {
     micBtn.hidden = false;
     micBtn.disabled = false;
     micBtn.textContent = "Request Microphone…";
     openBtn.hidden = true;
+    resetBtn.hidden = true;
   } else {
     micBtn.hidden = true;
     openBtn.hidden = true;
+    resetBtn.hidden = true;
   }
 }
 
@@ -409,6 +413,27 @@ async function init() {
     } catch (e) {
       addActivity(`Failed to open System Settings: ${e}`, "err");
     }
+  });
+
+  const resetMicButton = $("resetMicrophone");
+  resetMicButton.addEventListener("click", async () => {
+    resetMicButton.disabled = true;
+    resetMicButton.textContent = "Resetting…";
+    try {
+      const result = await invoke("reset_microphone");
+      if (result === "requested") {
+        addActivity("Mic permission reset — check for the system prompt now", "info");
+      } else if (result === "authorized") {
+        addActivity("Microphone access granted", "ok");
+      } else {
+        addActivity("Mic still denied after reset — enable it in System Settings", "warn");
+      }
+    } catch (e) {
+      addActivity(`Reset failed: ${e}`, "err");
+    }
+    resetMicButton.disabled = false;
+    resetMicButton.textContent = "Reset & ask again…";
+    await refreshPermissions();
   });
 
   const accButton = $("requestAccessibility");

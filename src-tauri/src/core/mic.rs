@@ -33,12 +33,38 @@ pub fn mic_permission() -> MicPermission {
     MicPermission::Authorized
 }
 
-/// Ask macOS to show the microphone permission prompt.
-///
-/// Fire-and-forget: if the status is not "undetermined", the system will not
-/// prompt (the answer is final and can only be changed in System Settings),
-/// so this returns immediately. When undetermined, the prompt is triggered and
-/// this returns right away — call [`mic_permission`] later to read the answer.
+/// Ask macOS to show the microphone permission prompt and wait for the user's
+/// answer (up to `timeout`). MUST be called on the main thread — macOS
+/// suppresses TCC prompts from background threads. Returns the status after
+/// the user responds (or the current status on timeout).
+#[cfg(target_os = "macos")]
+pub fn request_mic_permission_blocking(timeout: std::time::Duration) -> MicPermission {
+    use objc2::runtime::Bool;
+    use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
+    use std::sync::mpsc;
+
+    let status = mic_permission();
+    if status != MicPermission::NotDetermined {
+        return status;
+    }
+    let (tx, rx) = mpsc::sync_channel::<()>(1);
+    // The block must stay alive until the callback fires; AVFoundation copies
+    // it, but leak a copy anyway so a copy is never deallocated mid-flight.
+    let block: block2::RcBlock<dyn Fn(Bool) + 'static> = block2::RcBlock::new(move |_: Bool| {
+        let _ = tx.send(());
+    });
+    unsafe {
+        AVCaptureDevice::requestAccessForMediaType_completionHandler(
+            AVMediaTypeAudio.unwrap(),
+            &block,
+        );
+    }
+    let _ = Box::leak(Box::new(block));
+    let _ = rx.recv_timeout(timeout);
+    mic_permission()
+}
+
+/// Fire-and-forget variant used when we cannot block (e.g. from commands).
 #[cfg(target_os = "macos")]
 pub fn request_mic_permission() -> MicPermission {
     use objc2::runtime::Bool;
@@ -48,15 +74,30 @@ pub fn request_mic_permission() -> MicPermission {
     if status != MicPermission::NotDetermined {
         return status;
     }
-    // AVFoundation retains/copies the block, so dropping the RcBlock is fine.
-    let block = block2::RcBlock::new(|_: Bool| {});
+    let block: block2::RcBlock<dyn Fn(Bool) + 'static> =
+        block2::RcBlock::new(|_: Bool| {});
     unsafe {
         AVCaptureDevice::requestAccessForMediaType_completionHandler(
             AVMediaTypeAudio.unwrap(),
             &block,
         );
     }
+    let _ = Box::leak(Box::new(block));
     MicPermission::NotDetermined
+}
+
+/// Clear all TCC microphone decisions for this app so the next request shows
+/// a fresh prompt. Works without admin rights for the current user.
+#[cfg(target_os = "macos")]
+pub fn reset_mic_permission() -> Result<(), String> {
+    let out = std::process::Command::new("tccutil")
+        .args(["reset", "Microphone", crate::APP_ID])
+        .output()
+        .map_err(|e| format!("tccutil failed: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(())
 }
 
 /// Deep-link to the Microphone pane of System Settings (macOS 13+). This is
@@ -85,6 +126,11 @@ pub fn running_from_bundle() -> bool {
 #[cfg(not(target_os = "macos"))]
 pub fn request_mic_permission() -> MicPermission {
     MicPermission::Authorized
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reset_mic_permission() -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]

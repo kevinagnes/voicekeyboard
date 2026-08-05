@@ -200,6 +200,7 @@ pub fn run() {
             get_audio_level,
             request_accessibility,
             request_microphone,
+            reset_microphone,
             open_mic_settings,
             get_inference_stats,
             get_input_devices,
@@ -285,6 +286,15 @@ pub fn run() {
             }
             *state.hotkeys.lock() = Some(controller);
 
+            // Request mic permission BEFORE creating the recorder. cpal's
+            // stream setup can hang or fail when TCC is undetermined, and the
+            // prompt MUST fire on the main thread (setup runs on it). This
+            // blocks setup until the user answers (or 60s) — acceptable on
+            // first launch.
+            let mic_status =
+                mic::request_mic_permission_blocking(std::time::Duration::from_secs(60));
+            debug_log(&format!("mic: permission = {mic_status:?}"));
+
             let (max_secs, device_name) = {
                 let s = state.settings.lock();
                 (s.max_recording_secs, s.input_device.clone())
@@ -304,16 +314,18 @@ pub fn run() {
             spawn_hotkey_thread(handle.clone(), state.clone());
             spawn_model_loader(handle.clone(), state.clone());
 
-            // Trigger the mic TCC prompt proactively when it hasn't been
-            // asked yet (cpal alone never shows it).
+            // If the permission prompt timed out or the user answers later
+            // (e.g. via System Settings), rebuild the recorder once granted.
             let mic_state = state.clone();
             std::thread::spawn(move || {
-                if mic::mic_permission() == mic::MicPermission::NotDetermined {
-                    debug_log("mic: requesting permission (TCC prompt)");
-                    let status = mic::request_mic_permission();
-                    debug_log(&format!("mic: status after request = {status:?}"));
-                    if status == mic::MicPermission::Authorized {
+                for _ in 0..60 {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    if mic::mic_permission() == mic::MicPermission::Authorized
+                        && mic_state.recorder.lock().is_none()
+                    {
+                        debug_log("mic: granted later — rebuilding recorder");
                         rebuild_recorder(&mic_state);
+                        break;
                     }
                 }
             });
@@ -929,15 +941,21 @@ fn request_accessibility(app: AppHandle) -> bool {
 
 #[tauri::command]
 fn request_microphone(app: AppHandle, state: State<'_, Arc<AppState>>) -> String {
-    let status = mic::request_mic_permission();
-    debug_log(&format!("mic: permission request result = {status:?}"));
-    if status == mic::MicPermission::Authorized {
-        rebuild_recorder(state.inner());
-        let _ = app.emit(EVT_SETTINGS_CHANGED, ());
-    } else if status == mic::MicPermission::NotDetermined {
-        // Prompt now showing; the settings UI polls get_permissions and will
-        // see the answer when the user responds. Also watch for it here so
-        // the recorder is rebuilt as soon as it is granted.
+    let status = mic::mic_permission();
+    if status == mic::MicPermission::NotDetermined {
+        // Must fire on the main thread or macOS will not show the prompt.
+        let handle = app.clone();
+        let state2 = state.inner().clone();
+        let _ = app.run_on_main_thread(move || {
+            mic::request_mic_permission();
+            let st = mic::mic_permission();
+            debug_log(&format!("mic: request result = {st:?}"));
+            if st == mic::MicPermission::Authorized {
+                rebuild_recorder(&state2);
+                let _ = handle.emit(EVT_SETTINGS_CHANGED, ());
+            }
+        });
+        // Poll in the background; once the user answers, rebuild the recorder.
         let handle = app.clone();
         let state2 = state.inner().clone();
         std::thread::spawn(move || {
@@ -951,12 +969,49 @@ fn request_microphone(app: AppHandle, state: State<'_, Arc<AppState>>) -> String
                 }
             }
         });
+        "requested".into()
+    } else {
+        match status {
+            mic::MicPermission::Authorized => "authorized".into(),
+            mic::MicPermission::Denied => "denied".into(),
+            mic::MicPermission::NotDetermined => "notDetermined".into(),
+        }
     }
-    match status {
+}
+
+#[tauri::command]
+fn reset_microphone(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    mic::reset_mic_permission()?;
+    debug_log("mic: TCC reset done — requesting fresh prompt");
+    let handle = app.clone();
+    let state2 = state.inner().clone();
+    let _ = app.run_on_main_thread(move || {
+        mic::request_mic_permission();
+        let st = mic::mic_permission();
+        debug_log(&format!("mic: status after reset+request = {st:?}"));
+        if st == mic::MicPermission::Authorized {
+            rebuild_recorder(&state2);
+            let _ = handle.emit(EVT_SETTINGS_CHANGED, ());
+        }
+    });
+    let handle = app.clone();
+    let state2 = state.inner().clone();
+    std::thread::spawn(move || {
+        for _ in 0..30 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if mic::mic_permission() == mic::MicPermission::Authorized {
+                debug_log("mic: granted after reset");
+                rebuild_recorder(&state2);
+                let _ = handle.emit(EVT_SETTINGS_CHANGED, ());
+                break;
+            }
+        }
+    });
+    Ok(match mic::mic_permission() {
         mic::MicPermission::Authorized => "authorized".into(),
         mic::MicPermission::Denied => "denied".into(),
-        mic::MicPermission::NotDetermined => "notDetermined".into(),
-    }
+        mic::MicPermission::NotDetermined => "requested".into(),
+    })
 }
 
 #[tauri::command]
