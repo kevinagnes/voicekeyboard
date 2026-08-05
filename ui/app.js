@@ -174,9 +174,9 @@ function fmtBytes(n) {
 async function refreshUpdateStatus() {
   try {
     const u = await invoke("get_update_status");
-    $("version").textContent = u.current_version || "";
+    $("version").textContent = u.currentVersion || "";
     const av = $("aboutVersionSettings");
-    if (av) av.textContent = u.current_version || "";
+    if (av) av.textContent = u.currentVersion || "";
     $("checkUpdates").disabled = u.checking || u.installing;
     $("installUpdate").disabled = u.checking || u.installing;
     if (u.installing) {
