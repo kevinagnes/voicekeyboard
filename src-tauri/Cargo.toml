@@ -1,6 +1,6 @@
 [package]
 name = "voicekeyboard"
-version = "1.0.3"
+version = "1.0.4"
 description = "Local, offline-first push-to-talk dictation app"
 edition = "2021"
 rust-version = "1.85"
