@@ -46,7 +46,7 @@ cargo build --release          # binary only
 ```sh
 # 1. Store notarization credentials once (app-specific password from appleid.apple.com):
 xcrun notarytool store-credentials "VoiceKeyboard" \
-  --apple-id YOUR_APPLE_ID --team-id 2JNC7VSQ8N --password APP_SPECIFIC_PASSWORD
+  --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID --password APP_SPECIFIC_PASSWORD
 
 # 2. Build, sign (Developer ID + hardened runtime), DMG, notarize, staple:
 ./tools/package.sh
