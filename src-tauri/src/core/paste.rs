@@ -2,7 +2,6 @@
 pub struct PasteOutcome {
     pub pasted: bool,
     pub skipped_secure: bool,
-    pub no_focused_input: bool,
 }
 
 pub fn sanitize(text: &str) -> String {
@@ -94,88 +93,12 @@ pub fn focused_is_secure() -> bool {
     false
 }
 
-/// Whether the currently focused element accepts text input (text field,
-/// text area, combo box, search field, or a web/text container). Used to
-/// detect a paste that would go nowhere.
-#[cfg(target_os = "macos")]
-pub fn focused_is_text_input() -> bool {
-    use accessibility::{AXUIElement, AXUIElementAttributes, ElementFinder};
-    use objc2_app_kit::NSWorkspace;
-    use std::time::Duration as StdDuration;
-
-    const TEXT_ROLES: [&str; 7] = [
-        "AXTextField",
-        "AXTextArea",
-        "AXComboBox",
-        "AXSearchField",
-        "AXWebArea",
-        "AXTextAreaContainer",
-        "AXGroup", // Chromium/Electron editors (VS Code) often stop here
-    ];
-
-    fn role_is_text_input(el: &AXUIElement) -> bool {
-        let mut current = Some(el.clone());
-        while let Some(node) = current {
-            if let Ok(role) = node.role() {
-                if TEXT_ROLES.iter().any(|r| role == *r) {
-                    return true;
-                }
-            }
-            current = node.parent().ok();
-        }
-        false
-    }
-
-    let workspace = NSWorkspace::sharedWorkspace();
-    let Some(app) = workspace.frontmostApplication() else {
-        return false;
-    };
-    let app_el = AXUIElement::application(app.processIdentifier());
-
-    // Preferred: the app-reported focused element. Chromium apps (VS Code,
-    // Slack, Electron) do NOT mark elements inside their webview as focused,
-    // so an in-window search finds nothing — but the app-level
-    // kAXFocusedUIElementAttribute is accurate.
-    use core_foundation::base::TCFType;
-    let attr = accessibility::AXAttribute::<core_foundation::base::CFType>::new(
-        &core_foundation::string::CFString::from_static_string("AXFocusedUIElement"),
-    );
-    if let Ok(cf) = app_el.attribute(&attr) {
-        let raw = cf.as_CFTypeRef();
-        // The CFType owns a reference; wrap with a retain so both can drop.
-        let el: AXUIElement = unsafe { TCFType::wrap_under_get_rule(raw as *mut _) };
-        if role_is_text_input(&el) {
-            return true;
-        }
-    }
-
-    // Fallback: search the focused window for a focused element (native apps).
-    let Ok(window) = app_el.focused_window() else {
-        return false;
-    };
-    let finder = ElementFinder::new(
-        &window,
-        |el| el.focused().is_ok_and(bool::from),
-        Some(StdDuration::from_millis(200)),
-    );
-    if let Ok(focused) = finder.find() {
-        return role_is_text_input(&focused);
-    }
-    false
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn focused_is_text_input() -> bool {
-    true
-}
-
 pub fn paste_text(text: &str) -> Result<PasteOutcome, String> {
     let cleaned = sanitize(text);
     if cleaned.is_empty() {
         return Ok(PasteOutcome {
             pasted: false,
             skipped_secure: false,
-            no_focused_input: false,
         });
     }
 
@@ -187,58 +110,37 @@ pub fn paste_text(text: &str) -> Result<PasteOutcome, String> {
         return Ok(PasteOutcome {
             pasted: false,
             skipped_secure: true,
-            no_focused_input: false,
         });
     }
 
-    // The text must be left in the clipboard regardless of paste outcome, so
-    // the user can always paste manually with Cmd/Ctrl+V.
+    // Always put the text on the clipboard as a fallback.
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     clipboard.set_text(&cleaned).map_err(|e| e.to_string())?;
 
-    if !focused_is_text_input() {
-        return Ok(PasteOutcome {
-            pasted: false,
-            skipped_secure: false,
-            no_focused_input: true,
-        });
-    }
-
-    send_paste_keystroke()?;
+    // Simulate typing every keystroke instead of Cmd+V. This works in any
+    // app with a focused text input regardless of AX quirks (VS Code,
+    // Electron, web views) — no app/input-field detection needed.
+    type_text(&cleaned)?;
 
     Ok(PasteOutcome {
         pasted: true,
         skipped_secure: false,
-        no_focused_input: false,
     })
 }
 
-pub fn send_paste_keystroke() -> Result<(), String> {
-    use enigo::{Direction, Enigo, Keyboard, Key, Settings};
+/// Simulate typing `text` as a stream of keyboard events (newlines become
+/// Enter). Must be called on the main thread on macOS (enigo requirement).
+/// Uses enigo's text() path, which posts the full string through
+/// CGEventKeyboardSetUnicodeString — works in any focused text input
+/// regardless of app (VS Code, Electron, web views).
+pub fn type_text(text: &str) -> Result<(), String> {
+    use enigo::{Enigo, Keyboard, Settings};
 
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
-    let modifier = paste_modifier();
     enigo
-        .key(modifier, Direction::Press)
-        .map_err(|e| e.to_string())?;
-    enigo
-        .key(Key::Unicode('v'), Direction::Click)
-        .map_err(|e| e.to_string())?;
-    enigo
-        .key(modifier, Direction::Release)
-        .map_err(|e| e.to_string())?;
+        .text(text)
+        .map_err(|e| format!("failed to type text: {e}"))?;
     Ok(())
-}
-
-fn paste_modifier() -> enigo::Key {
-    #[cfg(target_os = "macos")]
-    {
-        enigo::Key::Meta
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        enigo::Key::Control
-    }
 }
 
 #[cfg(test)]

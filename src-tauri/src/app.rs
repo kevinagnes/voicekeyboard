@@ -349,15 +349,16 @@ pub fn run() {
 }
 
 /// enigo's macOS key injection (Key -> keycode via HIToolbox TSM) must run on
-/// the main thread, otherwise it traps (SIGTRAP). Clipboard + paste keystroke
-/// all happen here on the main thread.
+/// the main thread, otherwise it traps (SIGTRAP). Typing + clipboard all
+/// happen here on the main thread.
 fn paste_text_on_main(app: &AppHandle, text: &str) -> Result<paste::PasteOutcome, String> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<paste::PasteOutcome, String>>(1);
     let text = text.to_string();
     let _ = app.run_on_main_thread(move || {
         let _ = tx.send(paste::paste_text(&text));
     });
-    rx.recv_timeout(std::time::Duration::from_secs(10))
+    // Typing a long transcript takes longer than a paste; allow up to 60s.
+    rx.recv_timeout(std::time::Duration::from_secs(60))
         .unwrap_or_else(|_| Err("paste timed out".to_string()))
 }
 
@@ -393,14 +394,7 @@ fn handle_paste_failure(app: &AppHandle, state: &AppState, text: &str, reason: &
     let copied = copy_to_clipboard(text);
     state.sounds.play(sounds::Chime::Error);
     let message = if copied {
-        match reason {
-            "no input field is focused" => {
-                "Nothing is focused — transcript copied to clipboard, paste with Cmd/Ctrl+V".to_string()
-            }
-            _ => format!(
-                "Failed to paste ({reason}) — text copied to clipboard, paste with Cmd/Ctrl+V"
-            ),
-        }
+        format!("Couldn't type into the focused app ({reason}) — text is on your clipboard, paste with Cmd/Ctrl+V")
     } else {
         format!("Failed to paste: {reason}")
     };
@@ -497,14 +491,6 @@ fn spawn_stt_worker(app: AppHandle, state: Arc<AppState>, rx: mpsc::Receiver<Job
                                             let _ = app.emit(EVT_SECURE_SKIPPED, ());
                                             hide_overlay_delayed(&app, std::time::Duration::from_millis(900));
                                         }
-                                        Ok(outcome) if outcome.no_focused_input => {
-                                            handle_paste_failure(
-                                                &app,
-                                                &state,
-                                                &transcription.text,
-                                                "no input field is focused",
-                                            );
-                                        }
                                         Ok(_) => {
                                             debug_log("paste: no-op (empty)");
                                             hide_overlay_delayed(&app, std::time::Duration::from_millis(900));
@@ -571,19 +557,6 @@ fn on_pressed(app: &AppHandle, state: &Arc<AppState>) {
         .get_webview_window("settings")
         .is_some_and(|w| w.is_focused().unwrap_or(false))
     {
-        return;
-    }
-    // Don't engage recording when nothing can receive the text.
-    if !paste::focused_is_text_input() {
-        debug_log("pressed: blocked — no input field focused");
-        state.sounds.play(sounds::Chime::Error);
-        let message = "No input field is focused — click into a text field and try again.";
-        let _ = app.emit(EVT_PASTE_FAILED, message);
-        let handle = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            crate::notify::show("VoiceKeyboard — nothing focused", message);
-            let _ = handle;
-        });
         return;
     }
     state.recording.store(true, Ordering::SeqCst);

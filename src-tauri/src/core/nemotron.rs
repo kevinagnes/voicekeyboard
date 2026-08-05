@@ -254,7 +254,14 @@ fn build_session(path: &Path) -> Result<ort::session::Session, String> {
 }
 
 impl NemotronEngine {
+    /// Load from a model directory, or from the primary `encoder.onnx` file
+    /// path (the app passes the resolved download path).
     pub fn load(dir: &Path) -> Result<Self, String> {
+        let dir = if dir.is_dir() {
+            dir.to_path_buf()
+        } else {
+            dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| dir.to_path_buf())
+        };
         let enc = build_session(&dir.join("encoder.onnx"))?;
         let dec = build_session(&dir.join("decoder.onnx"))?;
         let joint = build_session(&dir.join("joint.onnx"))?;
