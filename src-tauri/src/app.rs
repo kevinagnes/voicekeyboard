@@ -569,6 +569,19 @@ fn on_pressed(app: &AppHandle, state: &Arc<AppState>) {
     {
         return;
     }
+    // Don't engage recording when nothing can receive the text.
+    if !paste::focused_is_text_input() {
+        debug_log("pressed: blocked — no input field focused");
+        state.sounds.play(sounds::Chime::Error);
+        let message = "No input field is focused — click into a text field and try again.";
+        let _ = app.emit(EVT_PASTE_FAILED, message);
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            crate::notify::show("VoiceKeyboard — nothing focused", message);
+            let _ = handle;
+        });
+        return;
+    }
     state.recording.store(true, Ordering::SeqCst);
     debug_log(&format!(
         "pressed: model_loaded={}",
