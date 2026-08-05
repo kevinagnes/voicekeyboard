@@ -13,117 +13,136 @@
       <div id="status" class="status">Checking…</div>
     </header>
 
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="setup">Get started</button>
+      <button class="tab" data-tab="general">General</button>
+      <button class="tab" data-tab="activity">Activity</button>
+      <button class="tab" data-tab="analytics">Analytics</button>
+      <button class="tab" data-tab="updates">Updates</button>
+    </nav>
+
     <main class="panel">
-      <section class="card">
-        <h2>Activity</h2>
-        <ul id="activity" class="activity">
-          <li class="activity-empty">Nothing yet. Hold your hotkey and speak.</li>
-        </ul>
+      <section id="tab-setup" class="tab-panel">
+        <section class="card">
+          <h2>Permissions</h2>
+          <p class="hint">VoiceKeyboard needs Microphone access to record and Accessibility access to paste text.</p>
+          <ul id="permissions" class="permissions"></ul>
+          <div class="row">
+            <button id="requestMicrophone" class="secondary">Request Microphone…</button>
+            <button id="openMicSettings" class="secondary" hidden>Open System Settings…</button>
+            <button id="resetMicrophone" class="secondary" hidden>Reset &amp; ask again…</button>
+            <button id="requestAccessibility" class="secondary">Request Accessibility…</button>
+          </div>
+          <p id="accGuide" class="hint" hidden></p>
+        </section>
+
+        <section class="card">
+          <h2>Model</h2>
+          <p class="hint">Downloaded on first run and cached locally. No audio ever leaves your machine.</p>
+          <div id="models"></div>
+          <div id="downloadProgress" class="download" hidden>
+            <progress id="downloadBar" value="0" max="1"></progress>
+            <span id="downloadText"></span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Recording hotkey</h2>
+          <p class="hint">Hold to record, release to transcribe and paste.</p>
+          <div class="row">
+            <input id="hotkey" type="text" placeholder="e.g. ShiftRight or ctrl+KeyG" spellcheck="false" />
+            <button id="captureHotkey" class="secondary">Capture keys…</button>
+          </div>
+          <div id="hotkeyHint" class="hint"></div>
+        </section>
       </section>
 
-      <section class="card">
-        <h2>Recording hotkey</h2>
-        <p class="hint">Hold to record, release to transcribe and paste.</p>
-        <div class="row">
-          <input id="hotkey" type="text" placeholder="e.g. ShiftRight or ctrl+KeyG" spellcheck="false" />
-          <button id="captureHotkey" class="secondary">Capture keys…</button>
-        </div>
-        <div id="hotkeyHint" class="hint"></div>
+      <section id="tab-general" class="tab-panel" hidden>
+        <section class="card">
+          <h2>Microphone</h2>
+          <select id="inputDevice">
+            <option value="">System default</option>
+          </select>
+        </section>
+
+        <section class="card">
+          <h2>Language</h2>
+          <select id="language">
+            <option value="auto">Auto-detect</option>
+            <option value="en">English</option>
+            <option value="pt">Português (Brasil)</option>
+          </select>
+        </section>
+
+        <section class="card">
+          <h2>Output</h2>
+          <label class="hint" for="initialPrompt">Optional hint to shape formatting:</label>
+          <textarea id="initialPrompt" rows="2"></textarea>
+          <label class="check"><input id="sounds" type="checkbox" /> Play chimes (start / done)</label>
+        </section>
+
+        <section class="card">
+          <h2>Startup</h2>
+          <label class="check"><input id="launchAtLogin" type="checkbox" /> Launch at login</label>
+        </section>
+
+        <section class="card advanced">
+          <h2>Advanced</h2>
+          <div class="grid">
+            <label>Min recording (ms)
+              <input id="minMs" type="number" min="100" max="2000" step="50" />
+            </label>
+            <label>Max recording (s)
+              <input id="maxSecs" type="number" min="30" max="600" step="10" />
+            </label>
+          </div>
+        </section>
       </section>
 
-      <section class="card">
-        <h2>Microphone</h2>
-        <select id="inputDevice">
-          <option value="">System default</option>
-        </select>
+      <section id="tab-activity" class="tab-panel" hidden>
+        <section class="card">
+          <h2>Activity</h2>
+          <ul id="activity" class="activity">
+            <li class="activity-empty">Nothing yet. Hold your hotkey and speak.</li>
+          </ul>
+        </section>
+
+        <section class="card">
+          <h2>Recent Transcriptions</h2>
+          <div id="recentList" class="recent-list">
+            <div class="hint">No transcriptions yet.</div>
+          </div>
+        </section>
       </section>
 
-      <section class="card">
-        <h2>Language</h2>
-        <select id="language">
-          <option value="auto">Auto-detect</option>
-          <option value="en">English</option>
-          <option value="pt">Português (Brasil)</option>
-        </select>
+      <section id="tab-analytics" class="tab-panel" hidden>
+        <section class="card">
+          <h2>Performance</h2>
+          <div class="stats" id="stats">
+            <div class="stat"><span class="stat-label">Total runs:</span> <span id="statRuns">—</span></div>
+            <div class="stat"><span class="stat-label">Avg inference:</span> <span id="statAvgMs">—</span></div>
+            <div class="stat"><span class="stat-label">Total time:</span> <span id="statTotalMs">—</span></div>
+            <div class="stat"><span class="stat-label">Avg segments:</span> <span id="statAvgSegs">—</span></div>
+          </div>
+        </section>
       </section>
 
-      <section class="card">
-        <h2>Model</h2>
-        <p class="hint">Downloaded on first run and cached locally. No audio ever leaves your machine.</p>
-        <div id="models"></div>
-        <div id="downloadProgress" class="download" hidden>
-          <progress id="downloadBar" value="0" max="1"></progress>
-          <span id="downloadText"></span>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>Output</h2>
-        <label class="hint" for="initialPrompt">Optional hint to shape formatting:</label>
-        <textarea id="initialPrompt" rows="2"></textarea>
-        <label class="check"><input id="sounds" type="checkbox" /> Play chimes (start / done)</label>
-      </section>
-
-      <section class="card">
-        <h2>Startup</h2>
-        <label class="check"><input id="launchAtLogin" type="checkbox" /> Launch at login</label>
-      </section>
-
-      <section class="card advanced">
-        <h2>Advanced</h2>
-        <div class="grid">
-          <label>Min recording (ms)
-            <input id="minMs" type="number" min="100" max="2000" step="50" />
-          </label>
-          <label>Max recording (s)
-            <input id="maxSecs" type="number" min="30" max="600" step="10" />
-          </label>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>Performance</h2>
-        <div class="stats" id="stats">
-          <div class="stat"><span class="stat-label">Total runs:</span> <span id="statRuns">—</span></div>
-          <div class="stat"><span class="stat-label">Avg inference:</span> <span id="statAvgMs">—</span></div>
-          <div class="stat"><span class="stat-label">Total time:</span> <span id="statTotalMs">—</span></div>
-          <div class="stat"><span class="stat-label">Avg segments:</span> <span id="statAvgSegs">—</span></div>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>Recent Transcriptions</h2>
-        <div id="recentList" class="recent-list">
-          <div class="hint">No transcriptions yet.</div>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>Updates</h2>
-        <p class="hint">Version <span id="version"></span>. Updates are distributed as GitHub releases.</p>
-        <div id="updateStatus" class="hint"></div>
-        <div id="updateProgress" class="download" hidden>
-          <progress id="updateBar" value="0" max="1"></progress>
-          <span id="updateText"></span>
-        </div>
-        <div class="row">
-          <button id="checkUpdates" class="secondary">Check for updates…</button>
-          <button id="installUpdate" class="primary" hidden>Download &amp; install</button>
-        </div>
-        <label class="check"><input id="autoUpdate" type="checkbox" /> Check for updates automatically</label>
-        <p id="updateNotes" class="hint" hidden></p>
-      </section>
-
-      <section class="card">
-        <h2>Permissions</h2>
-        <ul id="permissions" class="permissions"></ul>
-        <div class="row">
-          <button id="requestMicrophone" class="secondary">Request Microphone…</button>
-          <button id="openMicSettings" class="secondary" hidden>Open System Settings…</button>
-          <button id="resetMicrophone" class="secondary" hidden>Reset &amp; ask again…</button>
-          <button id="requestAccessibility" class="secondary">Request Accessibility…</button>
-        </div>
-        <p id="accGuide" class="hint" hidden></p>
+      <section id="tab-updates" class="tab-panel" hidden>
+        <section class="card">
+          <h2>Updates</h2>
+          <p class="hint">Version <span id="version"></span>. Updates are distributed as GitHub releases.</p>
+          <div id="updateStatus" class="hint"></div>
+          <div id="updateProgress" class="download" hidden>
+            <progress id="updateBar" value="0" max="1"></progress>
+            <span id="updateText"></span>
+          </div>
+          <div class="row">
+            <button id="checkUpdates" class="secondary">Check for updates…</button>
+            <button id="installUpdate" class="primary" hidden>Download &amp; install</button>
+          </div>
+          <label class="check"><input id="autoUpdate" type="checkbox" /> Check for updates automatically</label>
+          <p id="updateNotes" class="hint" hidden></p>
+        </section>
       </section>
 
       <div class="actions">

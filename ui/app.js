@@ -4,6 +4,15 @@ const listen = window.__TAURI__.event.listen;
 const $ = (id) => document.getElementById(id);
 const state = { settings: null, capturing: false };
 
+function switchTab(name) {
+  document.querySelectorAll(".tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === name);
+  });
+  document.querySelectorAll(".tab-panel").forEach((p) => {
+    p.hidden = p.id !== `tab-${name}`;
+  });
+}
+
 async function refreshStatus() {
   try {
     const status = await invoke("get_status");
@@ -385,6 +394,10 @@ async function init() {
   });
   $("save").addEventListener("click", save);
 
+  document.querySelectorAll(".tab").forEach((b) => {
+    b.addEventListener("click", () => switchTab(b.dataset.tab));
+  });
+
   const micButton = $("requestMicrophone");
   micButton.addEventListener("click", async () => {
     micButton.disabled = true;
@@ -520,6 +533,10 @@ async function init() {
   listen("secure-skipped", () => {
     refreshStatus();
     addActivity("Skipped — password field detected", "warn");
+  });
+  listen("paste-failed", (e) => {
+    refreshStatus();
+    addActivity(e.payload || "Failed to paste — text copied to clipboard", "err");
   });
   listen("app-error", (e) => {
     const text = `VoiceKeyboard: ${e.payload}`;

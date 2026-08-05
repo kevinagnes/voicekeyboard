@@ -68,6 +68,41 @@ body {
   padding: 4px 24px 24px;
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 24px 8px;
+  flex-wrap: wrap;
+}
+
+.tab {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tab:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+.tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.tab-panel[hidden] {
+  display: none;
+}
+
 .card {
   background: var(--card);
   border: 1px solid var(--border);

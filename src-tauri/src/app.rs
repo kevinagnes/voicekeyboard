@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, LogicalPosition, Manager, Position, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::MacosLauncher;
@@ -26,6 +26,7 @@ pub const EVT_MODEL_MISSING: &str = "model-missing";
 pub const EVT_SETTINGS_CHANGED: &str = "settings-changed";
 pub const EVT_UPDATE_STATUS: &str = "update-status";
 pub const EVT_UPDATE_PROGRESS: &str = "update-download-progress";
+pub const EVT_PASTE_FAILED: &str = "paste-failed";
 
 const TRAY_ID: &str = "main";
 const OVERLAY_ID: &str = "recording-overlay";
@@ -36,13 +37,6 @@ const OVERLAY_BOTTOM_MARGIN: f64 = 72.0;
 enum Job {
     Transcribe(Vec<f32>, Option<String>, String),
     LoadModel(PathBuf),
-}
-
-const PENDING_PASTE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-
-pub struct PendingPaste {
-    pub text: String,
-    pub expires_at: std::time::Instant,
 }
 
 pub struct AppState {
@@ -56,7 +50,6 @@ pub struct AppState {
     downloading: Mutex<Option<String>>,
     download_progress: Mutex<Option<(u64, u64)>>,
     overlay: Mutex<Option<tauri::WebviewWindow<tauri::Wry>>>,
-    pending_paste: Mutex<Option<PendingPaste>>,
     recent: Mutex<Vec<String>>,
     pub recording: AtomicBool,
     pub busy: AtomicBool,
@@ -83,7 +76,6 @@ impl AppState {
             downloading: Mutex::new(None),
             download_progress: Mutex::new(None),
             overlay: Mutex::new(None),
-            pending_paste: Mutex::new(None),
             recent: Mutex::new(Vec::new()),
             recording: AtomicBool::new(false),
             busy: AtomicBool::new(false),
@@ -229,8 +221,6 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "settings" => open_settings(app),
-                    "chimes" => toggle_chimes(app),
-                    "paste-last" => paste_last(app),
                     "check-updates" => {
                         if let Some(state) = app.try_state::<Arc<AppState>>() {
                             if state.update.lock().is_some() {
@@ -370,78 +360,50 @@ fn paste_text_on_main(app: &AppHandle, text: &str) -> Result<paste::PasteOutcome
         .unwrap_or_else(|_| Err("paste timed out".to_string()))
 }
 
-/// Keep the last transcript for manual re-paste (tray menu) for ~1 minute,
-/// so a paste that went nowhere (no input focused) can be retried.
-fn store_pending_paste(app: &AppHandle, state: &Arc<AppState>, text: &str) {
-    let expires_at = std::time::Instant::now() + PENDING_PASTE_TTL;
-    {
-        let mut pp = state.pending_paste.lock();
-        *pp = Some(PendingPaste {
-            text: text.to_string(),
-            expires_at,
-        });
-    }
-    debug_log(&format!(
-        "pending paste stored ({} chars, expires in {}s)",
-        text.len(),
-        PENDING_PASTE_TTL.as_secs()
-    ));
-    update_tray(app, state);
-    spawn_pending_expiry(app.clone(), state.clone());
-}
-
-fn spawn_pending_expiry(app: AppHandle, state: Arc<AppState>) {
-    std::thread::Builder::new()
-        .name("pending-expiry".into())
-        .spawn(move || {
-            std::thread::sleep(PENDING_PASTE_TTL);
-            let expired = {
-                let mut pp = state.pending_paste.lock();
-                match pp.as_ref() {
-                    Some(p) if p.expires_at <= std::time::Instant::now() => {
-                        *pp = None;
-                        true
-                    }
-                    _ => false,
-                }
-            };
-            if expired {
-                debug_log("pending paste expired");
-                update_tray(&app, &state);
-            }
-        })
-        .ok();
-}
-
-fn paste_last(app: &AppHandle) {
-    let Some(state) = app.try_state::<Arc<AppState>>() else {
-        return;
-    };
-    let text = {
-        let mut pp = state.pending_paste.lock();
-        match pp.as_ref() {
-            Some(p) if p.expires_at > std::time::Instant::now() => Some(p.text.clone()),
-            Some(_) => {
-                *pp = None;
-                None
-            }
-            None => None,
+/// Put text on the system clipboard so the user can paste it manually after a
+/// failed auto-paste. Returns true on success.
+fn copy_to_clipboard(text: &str) -> bool {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(c) => c,
+        Err(e) => {
+            debug_log(&format!("clipboard: failed to open -> {e}"));
+            return false;
         }
     };
-    if let Some(text) = text {
-        if !text.is_empty() {
-            debug_log("copy-last: attempting");
-            match paste_text_on_main(app, &text) {
-                Ok(outcome) if outcome.pasted => {
-                    state.sounds.play(sounds::Chime::PasteDone);
-                    debug_log("copy-last: ok");
-                }
-                Ok(_) => debug_log("copy-last: skipped"),
-                Err(e) => emit_error(app, &e),
-            }
+    match clipboard.set_text(text) {
+        Ok(()) => {
+            debug_log(&format!(
+                "clipboard: {} chars copied",
+                text.len()
+            ));
+            true
+        }
+        Err(e) => {
+            debug_log(&format!("clipboard: set_text failed -> {e}"));
+            false
         }
     }
-    update_tray(app, &state);
+}
+
+/// Handle a paste that failed: put the text on the clipboard, play the error
+/// chime, and notify the user that they can paste manually.
+fn handle_paste_failure(app: &AppHandle, state: &AppState, text: &str, error: &str) {
+    debug_log(&format!("paste: failed -> {error}"));
+    let copied = copy_to_clipboard(text);
+    state.sounds.play(sounds::Chime::Error);
+    let message = if copied {
+        "Failed to paste — text is on your clipboard, paste it with Cmd/Ctrl+V".to_string()
+    } else {
+        format!("Failed to paste: {error}")
+    };
+    let _ = app.emit(EVT_PASTE_FAILED, message.clone());
+    // Native notification banner (on the main thread).
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        crate::notify::show("VoiceKeyboard — paste failed", &message);
+        let _ = handle;
+    });
+    hide_overlay_delayed(app, std::time::Duration::from_millis(1500));
 }
 
 fn spawn_hotkey_thread(app: AppHandle, state: Arc<AppState>) {
@@ -497,7 +459,6 @@ fn spawn_stt_worker(app: AppHandle, state: Arc<AppState>, rx: mpsc::Receiver<Job
                                         recent.insert(0, transcription.text.clone());
                                         recent.truncate(MAX_RECENT);
                                     }
-                                    store_pending_paste(&app, &state, &transcription.text);
                                     match paste_text_on_main(&app, &transcription.text) {
                                         Ok(outcome) if outcome.pasted => {
                                             state.sounds.play(sounds::Chime::PasteDone);
@@ -525,9 +486,12 @@ fn spawn_stt_worker(app: AppHandle, state: Arc<AppState>, rx: mpsc::Receiver<Job
                                             hide_overlay_delayed(&app, std::time::Duration::from_millis(900));
                                         }
                                         Err(e) => {
-                                            debug_log(&format!("paste: failed -> {e}"));
-                                            emit_error(&app, &e);
-                                            hide_overlay_delayed(&app, std::time::Duration::from_millis(900));
+                                            handle_paste_failure(
+                                                &app,
+                                                &state,
+                                                &transcription.text,
+                                                &e,
+                                            );
                                         }
                                     }
                                 }
@@ -716,49 +680,10 @@ fn build_menu(app: &AppHandle, state: &AppState) -> tauri::Result<tauri::menu::M
         let hotkey = state.settings.lock().hotkey.clone();
         format!("Ready — hold {} to record", hotkey::display(&hotkey))
     };
-    let status = MenuItem::with_id(app, "status", status_text, true, None::<&str>)?;
-    let paste_last = MenuItem::with_id(
-        app,
-        "paste-last",
-        "Paste last transcript",
-        state.pending_paste.lock().as_ref().is_some_and(|p| p.expires_at > std::time::Instant::now()),
-        None::<&str>,
-    )?;
-    let open = MenuItem::with_id(app, "settings", "Open Settings…", true, Some("CmdOrCtrl+,"))?;
-    let check_updates = if let Some(update) = state.update.lock().as_ref() {
-        MenuItem::with_id(
-            app,
-            "check-updates",
-            format!("Update available — v{}", update.latest_version),
-            true,
-            None::<&str>,
-        )?
-    } else {
-        MenuItem::with_id(app, "check-updates", "Check for updates…", true, None::<&str>)?
-    };
-    let chimes = CheckMenuItem::with_id(
-        app,
-        "chimes",
-        "Play chimes",
-        true,
-        state.sounds.enabled(),
-        None::<&str>,
-    )?;
+    let status = MenuItem::with_id(app, "status", status_text, false, None::<&str>)?;
+    let open = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
     let quit = PredefinedMenuItem::quit(app, Some("Quit VoiceKeyboard"))?;
-    Menu::with_items(app, &[&status, &paste_last, &open, &check_updates, &chimes, &quit])
-}
-
-fn toggle_chimes(app: &AppHandle) {
-    if let Some(state) = app.try_state::<Arc<AppState>>() {
-        let enabled = !state.sounds.enabled();
-        state.sounds.set_enabled(enabled);
-        let mut s = state.settings.lock();
-        s.sounds = enabled;
-        let _ = settings::save(&s);
-        let _ = app.emit(EVT_SETTINGS_CHANGED, ());
-        drop(s);
-        update_tray(app, &state);
-    }
+    Menu::with_items(app, &[&status, &open, &quit])
 }
 
 fn open_settings(app: &AppHandle) {

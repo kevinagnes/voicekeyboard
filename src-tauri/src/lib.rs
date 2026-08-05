@@ -2,6 +2,7 @@ pub mod core;
 mod app;
 mod downloader;
 mod model_registry;
+mod notify;
 mod updater;
 
 use std::path::PathBuf;
