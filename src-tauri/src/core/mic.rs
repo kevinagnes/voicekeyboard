@@ -129,9 +129,11 @@ pub fn request_mic_permission() -> MicPermission {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn reset_mic_permission() -> Result<(), String> {
-    Ok(())
+pub fn request_mic_permission_blocking(_timeout: std::time::Duration) -> MicPermission {
+    MicPermission::Authorized
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn open_mic_settings() {}
+pub fn reset_mic_permission() -> Result<(), String> {
+    Ok(())
+}

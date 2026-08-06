@@ -831,7 +831,7 @@ fn emit_error(app: &AppHandle, message: &str) {
     let _ = app.emit(EVT_ERROR, message);
 }
 
-fn debug_log(msg: &str) {
+pub(crate) fn debug_log(msg: &str) {
     use std::io::Write;
     let path = crate::app_data_dir().join("voicekeyboard.log");
     if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -1220,7 +1220,9 @@ fn start_download(app: &AppHandle, state: &Arc<AppState>, model_id: &str) {
                     );
                     let active = state2.settings.lock().model_id.clone();
                     if active == mid {
-                        enqueue_load(&state2, dest);
+                        if let Some(path) = state2.registry.resolve_path(&mid) {
+                            enqueue_load(&state2, path);
+                        }
                     } else {
                         let _ = handle.emit(EVT_MODEL_MISSING, &mid);
                     }

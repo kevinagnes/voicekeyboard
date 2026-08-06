@@ -70,7 +70,13 @@ impl ModelRegistry {
     }
 
     pub fn resolve_path(&self, id: &str) -> Option<std::path::PathBuf> {
-        self.find(id).map(|m| self.download_dir().join(&m.filename))
+        self.find(id).map(|m| {
+            if m.files.is_empty() {
+                self.download_dir().join(&m.filename)
+            } else {
+                self.download_dir()
+            }
+        })
     }
 }
 

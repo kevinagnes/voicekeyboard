@@ -30,8 +30,8 @@ const DECODER_HIDDEN: usize = 640;
 const PRE_CACHE_SIZE: usize = 9;
 const ATTN_LEFT_CONTEXT: usize = 56;
 const CONV_CACHE_SIZE: usize = 8;
-const MEL_FRAMES: usize = 32; // per encoder window
-const OUTPUT_FRAMES: usize = 4; // encoder frames emitted per window
+const MEL_FRAMES: usize = 32; // per encoder window (320 ms)
+const WIN_SAMPLES: usize = MEL_FRAMES * HOP_LENGTH; // 5120 samples per window
 const MAX_SYMBOLS: usize = 10; // RNN-T expansions per encoder frame
 
 const BLANK_ID: usize = 13_087;
@@ -116,18 +116,6 @@ impl MelFrontEnd {
         }
     }
 
-    /// Pre-emphasis y[n] = x[n] - a*x[n-1], first sample uses the carry from
-    /// the previous window. Returns the last raw sample for the next window.
-    fn preemphasize(&self, pcm: &mut [f32], carry: f32) -> f32 {
-        let mut prev = carry;
-        for x in pcm.iter_mut() {
-            let cur = *x;
-            *x = cur - PREEMPH * prev;
-            prev = cur;
-        }
-        prev
-    }
-
     /// Log-mel spectrogram: [MEL_BINS, frames] column-major (bin-major).
     fn compute(&mut self, pcm: &[f32]) -> Vec<f32> {
         let pad = N_FFT / 2;
@@ -148,7 +136,7 @@ impl MelFrontEnd {
         }
         let num_frames = num_frames as usize;
 
-        let mut fft = self.planner.plan_fft_forward(N_FFT);
+        let fft = self.planner.plan_fft_forward(N_FFT);
         let mut mel = vec![0.0f32; MEL_BINS * num_frames];
         let mut frame = vec![Complex::new(0.0f32, 0.0f32); N_FFT];
 
@@ -239,32 +227,108 @@ pub struct NemotronTranscription {
     pub inference_ms: u64,
 }
 
-fn build_session(path: &Path) -> Result<ort::session::Session, String> {
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+fn build_session(path: &Path, use_gpu: bool) -> Result<ort::session::Session, String> {
     let mut builder =
         ort::session::Session::builder().map_err(|e| format!("session builder: {e}"))?;
+    let n_threads = std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).clamp(4, 16))
+        .unwrap_or(4);
     builder = builder
-        .with_intra_threads(4)
+        .with_intra_threads(n_threads)
         .map_err(|e| format!("session builder: {e}"))?;
     builder = builder
         .with_optimization_level(ort::session::builder::GraphOptimizationLevel::All)
         .map_err(|e| format!("session builder: {e}"))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        use ort::execution_providers::{CUDA, DirectML};
+        // GPU backends are opt-in (VK_NEMOTRON_CUDA / VK_NEMOTRON_DML); CPU is
+        // the default — measured identical speed for the 320 ms streaming
+        // windows (encoder is launch/IO-bound, not compute-bound).
+        let use_cuda = use_gpu
+            && std::env::var_os("VK_NEMOTRON_CPU").is_none()
+            && std::env::var_os("VK_NEMOTRON_CUDA").is_some()
+            && std::env::var_os("VK_NEMOTRON_DML").is_none();
+        let use_dml = use_gpu
+            && std::env::var_os("VK_NEMOTRON_CPU").is_none()
+            && std::env::var_os("VK_NEMOTRON_DML").is_some()
+            && std::env::var_os("VK_NEMOTRON_CUDA").is_none();
+        if use_dml {
+            // DirectML: graph fusion silently corrupts the encoder output,
+            // so optimization is disabled (opt-in for experimentation).
+            let opt = match std::env::var("VK_NEMOTRON_OPT").ok().as_deref() {
+                Some("1") => ort::session::builder::GraphOptimizationLevel::Level1,
+                Some("2") => ort::session::builder::GraphOptimizationLevel::Level2,
+                Some("3") => ort::session::builder::GraphOptimizationLevel::Level3,
+                _ => ort::session::builder::GraphOptimizationLevel::Disable,
+            };
+            let dml_builder = builder
+                .clone()
+                .with_optimization_level(opt)
+                .map_err(|e| format!("session builder: {e}"))?;
+            match dml_builder.with_execution_providers([DirectML::default().build()]) {
+                Ok(mut dml) => match dml.commit_from_file(path) {
+                    Ok(session) => {
+                        crate::app::debug_log("nemotron: session ready (DirectML GPU)");
+                        return Ok(session);
+                    }
+                    Err(e) => {
+                        crate::app::debug_log(&format!(
+                            "nemotron: DirectML session failed ({e}), using CPU"
+                        ));
+                    }
+                },
+                Err(e) => {
+                    crate::app::debug_log(&format!(
+                        "nemotron: DirectML unavailable ({e}), using CPU"
+                    ));
+                }
+            }
+        } else if use_cuda {
+            match builder
+                .clone()
+                .with_execution_providers([CUDA::default()
+                    .with_cuda_graph(true)
+                    .with_prefer_nhwc(true)
+                    .build()])
+            {
+                Ok(mut cuda) => match cuda.commit_from_file(path) {
+                    Ok(session) => {
+                        crate::app::debug_log("nemotron: session ready (CUDA GPU)");
+                        return Ok(session);
+                    }
+                    Err(e) => {
+                        crate::app::debug_log(&format!(
+                            "nemotron: CUDA session failed ({e}), using CPU"
+                        ));
+                    }
+                },
+                Err(e) => {
+                    crate::app::debug_log(&format!(
+                        "nemotron: CUDA unavailable ({e}), using CPU"
+                    ));
+                }
+            }
+        }
+    }
+
     builder
         .commit_from_file(path)
         .map_err(|e| format!("failed to load {}: {e}", path.display()))
 }
 
 impl NemotronEngine {
-    /// Load from a model directory, or from the primary `encoder.onnx` file
-    /// path (the app passes the resolved download path).
     pub fn load(dir: &Path) -> Result<Self, String> {
-        let dir = if dir.is_dir() {
-            dir.to_path_buf()
-        } else {
-            dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| dir.to_path_buf())
-        };
-        let enc = build_session(&dir.join("encoder.onnx"))?;
-        let dec = build_session(&dir.join("decoder.onnx"))?;
-        let joint = build_session(&dir.join("joint.onnx"))?;
+        if std::env::var_os("VK_NEMOTRON_DEBUG").is_some() {
+            if let Ok(env) = ort::environment::Environment::current() {
+                env.set_log_level(ort::logging::LogLevel::Warning);
+            }
+        }
+        let enc = build_session(&dir.join("encoder.onnx"), true)?;
+        let dec = build_session(&dir.join("decoder.onnx"), false)?;
+        let joint = build_session(&dir.join("joint.onnx"), false)?;
         let vocab = load_vocab(&dir.join("vocab.json"))?;
         let (prompt_slots, auto_slot) = load_prompt_dictionary(&dir.join("languages.json"))?;
         Ok(Self {
@@ -290,26 +354,45 @@ impl NemotronEngine {
             .and_then(|l| self.prompt_slots.get(l).copied())
             .unwrap_or(self.auto_slot);
 
-        let win_samples = (MEL_FRAMES - 1) * HOP_LENGTH;
-        let mut carry = 0.0f32;
-        let mut i = 0usize;
-        let mut text = String::new();
-        while i + win_samples <= samples.len() {
-            let mut chunk = samples[i..i + win_samples].to_vec();
-            carry = self.mel.lock().preemphasize(&mut chunk, carry);
-            text.push_str(&stream.run_window(&chunk)?);
-            i += win_samples;
+        let mut pcm = samples.to_vec();
+        if !pcm.is_empty() {
+            let mut prev = 0.0f32;
+            for x in pcm.iter_mut() {
+                let cur = *x;
+                *x = cur - PREEMPH * prev;
+                prev = cur;
+            }
         }
-        // Trailing partial window: pad with silence (matches flush_stream).
-        if i < samples.len() {
-            let mut chunk = samples[i..].to_vec();
-            chunk.resize(win_samples, 0.0);
-            let _ = self.mel.lock().preemphasize(&mut chunk, carry);
-            text.push_str(&stream.run_window(&chunk)?);
+
+        let total = if pcm.is_empty() {
+            0
+        } else {
+            (pcm.len() + WIN_SAMPLES - 1) / WIN_SAMPLES
+        };
+        if total > 0 && pcm.len() % WIN_SAMPLES != 0 {
+            pcm.resize(total * WIN_SAMPLES, 0.0);
+        }
+
+        if total > 0 {
+            let mel = self.mel.lock().compute(&pcm);
+            let produced = mel.len() / MEL_BINS;
+            for w in 0..total {
+                let f0 = w * MEL_FRAMES;
+                if f0 + MEL_FRAMES > produced {
+                    break;
+                }
+                let mut window = vec![0.0f32; MEL_BINS * MEL_FRAMES];
+                for b in 0..MEL_BINS {
+                    let src = b * produced + f0;
+                    window[b * MEL_FRAMES..(b + 1) * MEL_FRAMES]
+                        .copy_from_slice(&mel[src..src + MEL_FRAMES]);
+                }
+                stream.run_window(&window)?;
+            }
         }
 
         Ok(NemotronTranscription {
-            text,
+            text: stream.accumulated,
             language: language.unwrap_or("auto").to_string(),
             inference_ms: start.elapsed().as_millis() as u64,
         })
@@ -326,6 +409,8 @@ struct Stream<'a> {
     dec_c: Vec<f32>,
     dec_hidden: Vec<f32>,
     prompt_slot: usize,
+    accumulated: String,
+    last_enc_ms: u64,
 }
 
 impl<'a> Stream<'a> {
@@ -340,28 +425,15 @@ impl<'a> Stream<'a> {
             dec_c: vec![0.0; DECODER_LAYERS * DECODER_HIDDEN],
             dec_hidden: vec![0.0; DECODER_HIDDEN],
             prompt_slot: engine.auto_slot,
+            accumulated: String::new(),
+            last_enc_ms: 0,
         };
         // Prime the predictor with the blank token.
         s.run_decoder_step(BLANK_ID as i64);
         s
     }
 
-    fn run_window(&mut self, chunk: &[f32]) -> Result<String, String> {
-        let mut mel = self.engine.mel.lock().compute(chunk);
-        // Trim to exactly MEL_FRAMES (centred padding can overshoot).
-        let produced = mel.len() / MEL_BINS;
-        if produced < MEL_FRAMES {
-            return Ok(String::new());
-        }
-        if produced > MEL_FRAMES {
-            let mut trimmed = vec![0.0f32; MEL_BINS * MEL_FRAMES];
-            for b in 0..MEL_BINS {
-                trimmed[b * MEL_FRAMES..(b + 1) * MEL_FRAMES]
-                    .copy_from_slice(&mel[b * produced..b * produced + MEL_FRAMES]);
-            }
-            mel = trimmed;
-        }
-
+    fn run_window(&mut self, window: &[f32]) -> Result<(), String> {
         // Build language mask (one-hot prompt slot).
         let mut lang_mask = vec![0.0f32; NUM_PROMPTS];
         lang_mask[self.prompt_slot.min(NUM_PROMPTS - 1)] = 1.0;
@@ -382,7 +454,8 @@ impl<'a> Stream<'a> {
             CONV_CACHE_SIZE as i64,
         ];
 
-        let t_mel = ort::value::Tensor::from_array((shape_mel, mel)).map_err(|e| e.to_string())?;
+        let t_mel =
+            ort::value::Tensor::from_array((shape_mel, window.to_vec())).map_err(|e| e.to_string())?;
         let t_len = ort::value::Tensor::from_array((vec![1i64], vec![MEL_FRAMES as i32]))
             .map_err(|e| e.to_string())?;
         let t_lang =
@@ -406,14 +479,20 @@ impl<'a> Stream<'a> {
             "cache_last_channel_len" => t_chl,
         ];
 
+        let t_enc = std::time::Instant::now();
         let mut enc = self.engine.enc.lock();
         let outputs = enc
             .run(inputs)
             .map_err(|e| format!("encoder run failed: {e}"))?;
+        self.last_enc_ms = t_enc.elapsed().as_millis() as u64;
 
         // Outputs: encoded_output, encoded_length, new_pre_cache,
         // new_cache_last_channel, new_cache_last_time, new_cache_last_channel_len
         let encoded: Vec<f32> = outputs[0].try_extract_tensor::<f32>().map_err(|e| e.to_string())?.1.to_vec();
+        let enc_len: usize = {
+            let v: &[i32] = outputs[1].try_extract_tensor::<i32>().map_err(|e| e.to_string())?.1;
+            v.first().copied().unwrap_or(0).max(0) as usize
+        };
         self.pre_cache = outputs[2].try_extract_tensor::<f32>().map_err(|e| e.to_string())?.1.to_vec();
         self.cache_last_channel = outputs[3].try_extract_tensor::<f32>().map_err(|e| e.to_string())?.1.to_vec();
         self.cache_last_time = outputs[4].try_extract_tensor::<f32>().map_err(|e| e.to_string())?.1.to_vec();
@@ -422,9 +501,11 @@ impl<'a> Stream<'a> {
             v.first().copied().unwrap_or(0)
         };
 
-        // Greedy RNN-T decode over the committed frames.
+        // Greedy RNN-T decode over the encoder-emitted frames.
+        let frames = enc_len.min(encoded.len() / ENCODER_HIDDEN);
         let mut emitted = String::new();
-        for frame in 0..OUTPUT_FRAMES {
+        let t0 = std::time::Instant::now();
+        for frame in 0..frames {
             let frame_off = frame * ENCODER_HIDDEN;
             for _ in 0..MAX_SYMBOLS {
                 let logits = self.joint_logits(&encoded[frame_off..frame_off + ENCODER_HIDDEN])?;
@@ -436,7 +517,18 @@ impl<'a> Stream<'a> {
                 self.run_decoder_step(best as i64);
             }
         }
-        Ok(emitted)
+        self.accumulated.push_str(&emitted);
+        if std::env::var_os("VK_NEMOTRON_DEBUG").is_some() {
+            let mean: f32 = encoded.iter().map(|v| v * v).sum::<f32>() / encoded.len().max(1) as f32;
+            eprintln!(
+                "[nem] window: enc_len={frames} chl_len={} enc_rms={:.3} decode_ms={} enc_ms={}",
+                self.cache_last_channel_len,
+                mean.sqrt(),
+                t0.elapsed().as_millis(),
+                self.last_enc_ms
+            );
+        }
+        Ok(())
     }
 
     fn joint_logits(&self, enc_frame: &[f32]) -> Result<Vec<f32>, String> {
@@ -470,21 +562,29 @@ impl<'a> Stream<'a> {
             return;
         };
         let mut dec = self.engine.dec.lock();
-        let result = dec.run(inputs).ok().map(|outputs| {
-            let hidden = outputs[0]
-                .try_extract_tensor::<f32>()
-                .map(|t| t.1.to_vec())
-                .ok();
-            let h = outputs[1]
-                .try_extract_tensor::<f32>()
-                .map(|t| t.1.to_vec())
-                .ok();
-            let c = outputs[2]
-                .try_extract_tensor::<f32>()
-                .map(|t| t.1.to_vec())
-                .ok();
-            (hidden, h, c)
-        });
+        let result = match dec.run(inputs) {
+            Ok(outputs) => {
+                let hidden = outputs[0]
+                    .try_extract_tensor::<f32>()
+                    .map(|t| t.1.to_vec())
+                    .ok();
+                let h = outputs[1]
+                    .try_extract_tensor::<f32>()
+                    .map(|t| t.1.to_vec())
+                    .ok();
+                let c = outputs[2]
+                    .try_extract_tensor::<f32>()
+                    .map(|t| t.1.to_vec())
+                    .ok();
+                Some((hidden, h, c))
+            }
+            Err(e) => {
+                if std::env::var_os("VK_NEMOTRON_DEBUG").is_some() {
+                    eprintln!("[nem] decoder step failed: {e}");
+                }
+                None
+            }
+        };
         drop(dec);
         if let Some((hidden, h, c)) = result {
             if let Some(v) = hidden {
@@ -516,4 +616,25 @@ fn argmax(v: &[f32]) -> usize {
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs VK_TEST_PCM (raw f32 mono 16 kHz) and VK_TEST_MODEL_DIR"]
+    fn transcribe_real_speech() {
+        let pcm_path = std::env::var("VK_TEST_PCM").expect("VK_TEST_PCM not set");
+        let model_dir = std::env::var("VK_TEST_MODEL_DIR").expect("VK_TEST_MODEL_DIR not set");
+        let raw = std::fs::read(&pcm_path).unwrap();
+        let samples: Vec<f32> = raw
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let engine = NemotronEngine::load(Path::new(&model_dir)).unwrap();
+        let out = engine.transcribe(&samples, Some("en")).unwrap();
+        println!("nemotron-test text: {out:?}");
+        assert!(!out.text.trim().is_empty(), "transcript was empty");
+    }
 }
