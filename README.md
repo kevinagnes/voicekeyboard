@@ -21,15 +21,20 @@ Technology: https://doc.rust-lang.org/stable/cargo/
 | Registry/Download | `src-tauri/src/model_registry.rs`, `src-tauri/src/downloader.rs` | Model catalog, resumable download with retry/backoff + checksum verify |
 | Shell | `src-tauri/src/app.rs` | Menu-bar tray, state machine, Tauri commands/events, worker threads |
 
-## Run (dev)
+## Run (dev)  
 
 ```sh
 cd src-tauri
 cargo run
 ```
 
-A menu-bar icon appears. First run will ask for Microphone access and (after the model is
-downloaded) Accessibility access for pasting.
+A menu-bar icon appears. On launch the app always checks **Microphone** and
+**Accessibility** (for pasting) permissions: if either is not granted it prompts
+for it, and until both are granted the app is blocked behind a
+permissions-gate window that only offers to open System Settings or quit.
+Behavior is identical for dev runs and the installed `.app` (note: when running
+the raw `cargo run` binary, macOS may attribute the microphone TCC prompt to
+the launching terminal).
 
 ## Build a release
 

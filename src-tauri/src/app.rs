@@ -27,9 +27,11 @@ pub const EVT_SETTINGS_CHANGED: &str = "settings-changed";
 pub const EVT_UPDATE_STATUS: &str = "update-status";
 pub const EVT_UPDATE_PROGRESS: &str = "update-download-progress";
 pub const EVT_PASTE_FAILED: &str = "paste-failed";
+pub const EVT_PERMISSIONS_GRANTED: &str = "permissions-granted";
 
 const TRAY_ID: &str = "main";
 const OVERLAY_ID: &str = "recording-overlay";
+const GATE_ID: &str = "permissions-gate";
 const OVERLAY_W: f64 = 380.0;
 const OVERLAY_H: f64 = 64.0;
 const OVERLAY_BOTTOM_MARGIN: f64 = 72.0;
@@ -59,6 +61,9 @@ pub struct AppState {
     pub update_checking: AtomicBool,
     pub update_installing: AtomicBool,
     pub update_progress: Mutex<Option<(u64, u64)>>,
+    /// True while required permissions (mic + accessibility) are missing and
+    /// the app is blocked behind the permissions-gate window.
+    pub gated: AtomicBool,
 }
 
 const MAX_RECENT: usize = 3;
@@ -85,6 +90,7 @@ impl AppState {
             update_checking: AtomicBool::new(false),
             update_installing: AtomicBool::new(false),
             update_progress: Mutex::new(None),
+            gated: AtomicBool::new(false),
         }
     }
 }
@@ -194,6 +200,7 @@ pub fn run() {
             request_microphone,
             reset_microphone,
             open_mic_settings,
+            quit_app,
             get_inference_stats,
             get_input_devices,
             get_recent_transcriptions,
@@ -248,7 +255,15 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        open_settings(tray.app_handle());
+                        let app = tray.app_handle();
+                        let gated = app
+                            .try_state::<Arc<AppState>>()
+                            .is_some_and(|s| s.gated.load(Ordering::SeqCst));
+                        if gated {
+                            open_gate(app);
+                        } else {
+                            open_settings(app);
+                        }
                     }
                 })
                 .build(app)?;
@@ -277,14 +292,33 @@ pub fn run() {
             }
             *state.hotkeys.lock() = Some(controller);
 
-            // Request mic permission BEFORE creating the recorder. cpal's
-            // stream setup can hang or fail when TCC is undetermined, and the
-            // prompt MUST fire on the main thread (setup runs on it). This
-            // blocks setup until the user answers (or 60s) — acceptable on
-            // first launch.
+            // Request mic permission BEFORE creating the recorder. cpal's stream setup
+            // can hang or fail when TCC is undetermined, and the prompt MUST
+            // fire on the main thread (setup runs on it). This blocks setup
+            // until the user answers (or 60s) — acceptable on first launch.
+            // Identical behavior when running from a bundle or a raw binary.
             let mic_status =
                 mic::request_mic_permission_blocking(std::time::Duration::from_secs(60));
             debug_log(&format!("mic: permission = {mic_status:?}"));
+
+            // Accessibility is required to paste text into other apps. Ask for
+            // it now if it hasn't been granted yet — the system prompt opens
+            // System Settings. Non-blocking, and the mic decision above has
+            // already been made (the blocking call waited for the answer).
+            if !paste::accessibility_trusted() {
+                debug_log("accessibility: not trusted — requesting permission");
+                let _ = paste::request_accessibility_permission();
+            }
+
+            // Gate: until BOTH permissions are granted the app cannot record
+            // or paste, so all other functionality is locked behind the gate
+            // window (grant in System Settings, or quit).
+            let gated = mic_status != mic::MicPermission::Authorized
+                || !paste::accessibility_trusted();
+            state.gated.store(gated, Ordering::SeqCst);
+            if gated {
+                debug_log("permissions: gated — waiting for mic + accessibility");
+            }
 
             let (max_secs, device_name) = {
                 let s = state.settings.lock();
@@ -305,21 +339,54 @@ pub fn run() {
             spawn_hotkey_thread(handle.clone(), state.clone());
             spawn_model_loader(handle.clone(), state.clone());
 
-            // If the permission prompt timed out or the user answers later
-            // (e.g. via System Settings), rebuild the recorder once granted.
-            let mic_state = state.clone();
-            std::thread::spawn(move || {
-                for _ in 0..60 {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    if mic::mic_permission() == mic::MicPermission::Authorized
-                        && mic_state.recorder.lock().is_none()
-                    {
-                        debug_log("mic: granted later — rebuilding recorder");
-                        rebuild_recorder(&mic_state);
-                        break;
+            // Watch for permissions being granted later (user answers the prompt in
+            // System Settings). While gated, keep the gate window fresh; once
+            // everything is granted, un-gate: rebuild the recorder, close the
+            // gate, open Settings and update the tray.
+            let perm_handle = handle.clone();
+            let perm_state = state.clone();
+            std::thread::Builder::new()
+                .name("permission-watcher".into())
+                .spawn(move || {
+                    let mut last_mic = mic::mic_permission();
+                    let mut last_acc = paste::accessibility_trusted();
+                    for _ in 0..120 {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        let mic = mic::mic_permission();
+                        let acc = paste::accessibility_trusted();
+                        if mic == mic::MicPermission::Authorized
+                            && perm_state.recorder.lock().is_none()
+                        {
+                            debug_log("mic: granted later — rebuilding recorder");
+                            rebuild_recorder(&perm_state);
+                        }
+                        if mic != last_mic || acc != last_acc {
+                            last_mic = mic;
+                            last_acc = acc;
+                            update_tray(&perm_handle, &perm_state);
+                        }
+                        if all_permissions_granted()
+                            && perm_state.gated.swap(false, Ordering::SeqCst)
+                        {
+                            debug_log("permissions: all granted — un-gating");
+                            update_tray(&perm_handle, &perm_state);
+                            let _ = perm_handle.emit(EVT_PERMISSIONS_GRANTED, ());
+                            let ph = perm_handle.clone();
+                            let ph2 = ph.clone();
+                            let _ = ph.run_on_main_thread(move || {
+                                close_gate_window(&ph2);
+                                open_settings(&ph2);
+                            });
+                            break;
+                        }
                     }
-                }
-            });
+                })
+                .ok();
+
+            if gated {
+                open_gate(&handle);
+            }
+            update_tray(&handle, state);
 
             // Auto-update check shortly after launch.
             if state.settings.lock().auto_update {
@@ -335,9 +402,14 @@ pub fn run() {
                 let marker = crate::app_data_dir().join(".setup_done");
                 if !marker.exists() {
                     let h = handle.clone();
+                    let st = setup_state.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(500));
-                        open_settings(&h);
+                        if st.gated.load(Ordering::SeqCst) {
+                            open_gate(&h);
+                        } else {
+                            open_settings(&h);
+                        }
                         let _ = std::fs::write(&marker, "");
                     });
                 }
@@ -550,6 +622,10 @@ fn enqueue_load(state: &AppState, path: PathBuf) {
 }
 
 fn on_pressed(app: &AppHandle, state: &Arc<AppState>) {
+    if state.gated.load(Ordering::SeqCst) {
+        debug_log("pressed: ignored — permissions not granted");
+        return;
+    }
     if state.busy.load(Ordering::SeqCst) || state.recording.load(Ordering::SeqCst) {
         return;
     }
@@ -674,6 +750,25 @@ fn update_tray(app: &AppHandle, state: &AppState) {
 }
 
 fn build_menu(app: &AppHandle, state: &AppState) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    if state.gated.load(Ordering::SeqCst) {
+        let missing = if !all_permissions_granted() {
+            let mut parts = Vec::new();
+            if mic::mic_permission() != mic::MicPermission::Authorized {
+                parts.push("Microphone");
+            }
+            if !paste::accessibility_trusted() {
+                parts.push("Accessibility");
+            }
+            format!(" (missing: {})", parts.join(" + "))
+        } else {
+            String::new()
+        };
+        let status_text = format!("Permissions required{missing} — see the window");
+        let status = MenuItem::with_id(app, "status", status_text, false, None::<&str>)?;
+        let quit = PredefinedMenuItem::quit(app, Some("Quit VoiceKeyboard"))?;
+        return Menu::with_items(app, &[&status, &quit]);
+    }
+
     let status_text = if state.recording.load(Ordering::SeqCst) {
         "Recording…".to_string()
     } else if state.busy.load(Ordering::SeqCst) {
@@ -686,6 +781,8 @@ fn build_menu(app: &AppHandle, state: &AppState) -> tauri::Result<tauri::menu::M
         }
     } else if !state.model_loaded.load(Ordering::SeqCst) {
         "Model not downloaded — open Settings".to_string()
+    } else if mic::mic_permission() != mic::MicPermission::Authorized {
+        "Microphone permission needed — open Settings".to_string()
     } else if !paste::accessibility_trusted() {
         "Accessibility needed — open Settings".to_string()
     } else if !state.hotkey_ok.load(Ordering::SeqCst) {
@@ -721,6 +818,47 @@ fn open_settings(app: &AppHandle) {
             }
         });
         let _ = win.set_focus();
+    }
+}
+
+/// True once every required permission is granted (mic + accessibility).
+fn all_permissions_granted() -> bool {
+    mic::mic_permission() == mic::MicPermission::Authorized && paste::accessibility_trusted()
+}
+
+/// The permissions-gate window: shown until the user grants BOTH required
+/// permissions. It only offers to open System Settings or quit — no other
+/// functionality is reachable while the app is gated.
+fn open_gate(app: &AppHandle) {
+    let existing = app.get_webview_window(GATE_ID);
+    if let Some(win) = existing {
+        let _ = win.set_always_on_top(true);
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+    let win = WebviewWindowBuilder::new(app, GATE_ID, WebviewUrl::App("perm.html".into()))
+        .title("VoiceKeyboard — Permissions required")
+        .inner_size(480.0, 400.0)
+        .resizable(false)
+        .always_on_top(true)
+        .build();
+    if let Ok(win) = win {
+        let handle = win.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = handle.hide();
+            }
+        });
+        let _ = win.set_focus();
+    }
+}
+
+/// Close (destroy) the gate window once permissions are granted.
+fn close_gate_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(GATE_ID) {
+        let _ = win.destroy();
     }
 }
 
@@ -980,6 +1118,11 @@ fn reset_microphone(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<S
 #[tauri::command]
 fn open_mic_settings() {
     mic::open_mic_settings();
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
 }
 
 fn rebuild_recorder(state: &AppState) {

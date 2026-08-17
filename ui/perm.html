@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VoiceKeyboard — Permissions required</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <h1>VoiceKeyboard needs permissions</h1>
+      <p class="tagline">
+        VoiceKeyboard cannot record or paste until you grant
+        <strong>Microphone</strong> and <strong>Accessibility</strong> access.
+        Grant them below — the app continues automatically — or quit.
+      </p>
+      <div id="status" class="status">Checking permissions…</div>
+    </header>
+
+    <main class="panel">
+      <section class="card">
+        <h2>Required permissions</h2>
+        <ul id="permissions" class="permissions"></ul>
+        <div class="row">
+          <button id="micAction" class="secondary">Request Microphone…</button>
+          <button id="accAction" class="secondary">Request Accessibility…</button>
+        </div>
+        <p id="bundleNote" class="hint" hidden></p>
+        <p class="hint">
+          On macOS the Accessibility prompt opens System Settings — enable
+          “VoiceKeyboard” in Privacy &amp; Security → Accessibility.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>No other features are available until both permissions are granted</h2>
+        <div class="row">
+          <button id="quit" class="primary">Quit VoiceKeyboard</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="perm.js"></script>
+  </body>
+</html>
