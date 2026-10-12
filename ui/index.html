@@ -16,6 +16,7 @@
     <nav class="tabs" id="tabs">
       <button class="tab active" data-tab="setup">Setup</button>
       <button class="tab" data-tab="activity">Activity</button>
+      <button class="tab" data-tab="sessions">Sessions</button>
       <button class="tab" data-tab="analytics">Analytics</button>
       <button class="tab" data-tab="updates">Updates</button>
     </nav>
@@ -79,6 +80,35 @@
         </section>
 
         <section class="card">
+          <h2>AI Assistant (Gemini)</h2>
+          <p class="hint">Hold the ask-LLM hotkey, speak a question, and Gemini answers — spoken aloud and shown on screen. Ask about the news: Gemini grounds its answer in Google Search when it needs current information. Requires a <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Gemini API key</a>. Audio (text + speech) is sent to Google.</p>
+          <label class="hint" for="geminiKey">Gemini API key</label>
+          <input id="geminiKey" type="password" autocomplete="off" spellcheck="false" placeholder="AIza…" />
+          <div class="row">
+            <input id="llmHotkey" type="text" placeholder="e.g. ctrl+ShiftRight" spellcheck="false" />
+            <button id="captureLlmHotkey" class="secondary">Capture keys…</button>
+          </div>
+          <div class="row">
+            <button id="loadCatalog" class="secondary">Load models &amp; voices…</button>
+            <span id="catalogStatus" class="hint"></span>
+          </div>
+          <div class="grid">
+            <label>LLM model
+              <select id="llmModel"></select>
+            </label>
+            <label>TTS model
+              <select id="ttsModel"></select>
+            </label>
+          </div>
+          <label class="hint" for="ttsVoice">TTS voice (grouped by language)</label>
+          <select id="ttsVoice"></select>
+          <label class="hint" for="llmPrompt">System prompt (optional):</label>
+          <textarea id="llmPrompt" rows="2"></textarea>
+          <label class="hint" for="sessionLimit">Keep last N sessions (old ones are pruned):</label>
+          <input id="sessionLimit" type="number" min="1" max="500" step="1" />
+        </section>
+
+        <section class="card">
           <h2>Startup</h2>
           <label class="check"><input id="launchAtLogin" type="checkbox" /> Launch at login</label>
         </section>
@@ -114,6 +144,36 @@
           <div id="recentList" class="recent-list">
             <div class="hint">No transcriptions yet.</div>
           </div>
+        </section>
+      </section>
+
+      <section id="tab-sessions" class="tab-panel" hidden>
+        <section class="card">
+          <div class="session-head">
+            <h2>Sessions</h2>
+            <button id="newSession" class="primary">New session</button>
+          </div>
+          <p class="hint" id="sessionsHint">Questions go to the active session. “New session” gives the assistant a clean context.</p>
+          <div id="sessionList" class="session-list"></div>
+        </section>
+
+        <section class="card" id="sessionDetailCard" hidden>
+          <div class="session-head">
+            <h2 id="sessionDetailTitle">—</h2>
+            <span id="sessionActiveBadge" class="badge active" hidden>active</span>
+          </div>
+          <p class="hint" id="sessionDetailMeta"></p>
+          <div class="row session-actions">
+            <button id="sessionUse" class="primary">Continue this session</button>
+            <button id="sessionRename" class="secondary">Rename…</button>
+            <button id="sessionDelete" class="secondary">Delete</button>
+          </div>
+          <div class="row" id="sessionRenameRow" hidden>
+            <input id="sessionRenameInput" type="text" spellcheck="false" />
+            <button id="sessionRenameSave" class="secondary">Save</button>
+            <button id="sessionRenameCancel" class="secondary">Cancel</button>
+          </div>
+          <div id="sessionTurns" class="session-turns"></div>
         </section>
       </section>
 

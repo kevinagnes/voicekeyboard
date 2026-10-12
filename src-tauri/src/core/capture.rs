@@ -21,14 +21,12 @@ pub fn find_input_device(name: &str) -> Option<cpal::Device> {
         return cpal::default_host().default_input_device();
     }
     let host = cpal::default_host();
-    host.input_devices()
-        .ok()
-        .and_then(|devices| {
-            devices
-                .filter_map(|d| d.name().ok().map(|n| (n, d)))
-                .find(|(n, _)| n == name)
-                .map(|(_, d)| d)
-        })
+    host.input_devices().ok().and_then(|devices| {
+        devices
+            .filter_map(|d| d.name().ok().map(|n| (n, d)))
+            .find(|(n, _)| n == name)
+            .map(|(_, d)| d)
+    })
 }
 
 pub struct RingBuffer {
@@ -40,7 +38,9 @@ pub struct RingBuffer {
 
 impl RingBuffer {
     pub fn new(capacity_seconds: u64) -> Self {
-        let capacity = (capacity_seconds as usize).saturating_mul(SAMPLE_RATE as usize).max(1);
+        let capacity = (capacity_seconds as usize)
+            .saturating_mul(SAMPLE_RATE as usize)
+            .max(1);
         Self {
             data: vec![0.0; capacity],
             capacity,
@@ -208,8 +208,8 @@ fn build_stream(
     level: Arc<AtomicU32>,
     device_name: &str,
 ) -> Result<cpal::Stream, String> {
-    let device = find_input_device(device_name)
-        .ok_or_else(|| "no input device found".to_string())?;
+    let device =
+        find_input_device(device_name).ok_or_else(|| "no input device found".to_string())?;
     let config = device.default_input_config().map_err(|e| e.to_string())?;
     let channels = config.channels();
     let sample_rate = config.sample_rate().0;
@@ -217,11 +217,51 @@ fn build_stream(
     let stream_config: cpal::StreamConfig = config.into();
 
     let stream = match sample_format {
-        cpal::SampleFormat::F32 => build::<f32>(&device, &stream_config, channels, sample_rate, ring, capturing, level),
-        cpal::SampleFormat::I16 => build::<i16>(&device, &stream_config, channels, sample_rate, ring, capturing, level),
-        cpal::SampleFormat::U16 => build::<u16>(&device, &stream_config, channels, sample_rate, ring, capturing, level),
-        cpal::SampleFormat::I32 => build::<i32>(&device, &stream_config, channels, sample_rate, ring, capturing, level),
-        cpal::SampleFormat::U32 => build::<u32>(&device, &stream_config, channels, sample_rate, ring, capturing, level),
+        cpal::SampleFormat::F32 => build::<f32>(
+            &device,
+            &stream_config,
+            channels,
+            sample_rate,
+            ring,
+            capturing,
+            level,
+        ),
+        cpal::SampleFormat::I16 => build::<i16>(
+            &device,
+            &stream_config,
+            channels,
+            sample_rate,
+            ring,
+            capturing,
+            level,
+        ),
+        cpal::SampleFormat::U16 => build::<u16>(
+            &device,
+            &stream_config,
+            channels,
+            sample_rate,
+            ring,
+            capturing,
+            level,
+        ),
+        cpal::SampleFormat::I32 => build::<i32>(
+            &device,
+            &stream_config,
+            channels,
+            sample_rate,
+            ring,
+            capturing,
+            level,
+        ),
+        cpal::SampleFormat::U32 => build::<u32>(
+            &device,
+            &stream_config,
+            channels,
+            sample_rate,
+            ring,
+            capturing,
+            level,
+        ),
         other => return Err(format!("unsupported input sample format: {other}")),
     }?;
 

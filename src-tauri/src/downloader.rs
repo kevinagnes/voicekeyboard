@@ -65,7 +65,13 @@ impl Downloader {
         is_valid_model_file(dest)
     }
 
-    pub fn download<F>(&self, url: &str, dest: &Path, expected_sha256: &str, mut progress: F) -> Result<(), String>
+    pub fn download<F>(
+        &self,
+        url: &str,
+        dest: &Path,
+        expected_sha256: &str,
+        mut progress: F,
+    ) -> Result<(), String>
     where
         F: FnMut(u64, u64),
     {
@@ -88,7 +94,10 @@ impl Downloader {
                 Ok(()) => break,
                 Err(e) => {
                     if attempt == MAX_RETRIES {
-                        return Err(format!("download failed after {} attempts: {e}", MAX_RETRIES + 1));
+                        return Err(format!(
+                            "download failed after {} attempts: {e}",
+                            MAX_RETRIES + 1
+                        ));
                     }
                     let delay = BACKOFF_BASE_MS * 2u64.pow(attempt);
                     std::thread::sleep(Duration::from_millis(delay));
@@ -100,7 +109,9 @@ impl Downloader {
             let actual = sha256_of(&part).map_err(|e| e.to_string())?;
             if !actual.eq_ignore_ascii_case(expected_sha256) {
                 let _ = std::fs::remove_file(&part);
-                return Err(format!("checksum mismatch: expected {expected_sha256}, got {actual}"));
+                return Err(format!(
+                    "checksum mismatch: expected {expected_sha256}, got {actual}"
+                ));
             }
         } else if !is_valid_model_file(&part) {
             let _ = std::fs::remove_file(&part);
@@ -137,7 +148,10 @@ impl Downloader {
                 Ok(()) => break,
                 Err(e) => {
                     if attempt == MAX_RETRIES {
-                        return Err(format!("download failed after {} attempts: {e}", MAX_RETRIES + 1));
+                        return Err(format!(
+                            "download failed after {} attempts: {e}",
+                            MAX_RETRIES + 1
+                        ));
                     }
                     let delay = BACKOFF_BASE_MS * 2u64.pow(attempt);
                     std::thread::sleep(Duration::from_millis(delay));
@@ -218,7 +232,10 @@ impl Downloader {
             response = self.client.get(url).send().map_err(|e| e.to_string())?;
         }
 
-        let total = response.content_length().map(|l| l + if started_at_zero { 0 } else { start }).unwrap_or(0);
+        let total = response
+            .content_length()
+            .map(|l| l + if started_at_zero { 0 } else { start })
+            .unwrap_or(0);
         let mut downloaded = if started_at_zero { 0 } else { start };
         let mut buffer = vec![0u8; CHUNK];
         loop {
@@ -266,7 +283,10 @@ mod tests {
         let path = dir.join("sample.txt");
         let mut f = File::create(&path).unwrap();
         f.write_all(b"hello world\n").unwrap();
-        assert_eq!(sha256_of(&path).unwrap(), "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447");
+        assert_eq!(
+            sha256_of(&path).unwrap(),
+            "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

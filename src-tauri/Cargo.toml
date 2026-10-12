@@ -22,7 +22,8 @@ anyhow = "1"
 thiserror = "2"
 directories = "6"
 sha2 = "0.10"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "blocking"] }
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "blocking", "json"] }
 futures-util = "0.3"
 parking_lot = "0.12"
 rustfft = "6"

@@ -77,7 +77,11 @@ fn mel_filterbank() -> Vec<f32> {
         let left = hz_points[m];
         let center = hz_points[m + 1];
         let right = hz_points[m + 2];
-        let enorm = if right > left { 2.0 / (right - left) } else { 0.0 };
+        let enorm = if right > left {
+            2.0 / (right - left)
+        } else {
+            0.0
+        };
         for f in 0..num_bins {
             let f_hz = f as f64 * bin_hz;
             let w = if f_hz >= left && f_hz <= center && center > left {
@@ -243,7 +247,7 @@ fn build_session(path: &Path, use_gpu: bool) -> Result<ort::session::Session, St
 
     #[cfg(target_os = "windows")]
     {
-        use ort::execution_providers::{CUDA, DirectML};
+        use ort::execution_providers::{DirectML, CUDA};
         // GPU backends are opt-in (VK_NEMOTRON_CUDA / VK_NEMOTRON_DML); CPU is
         // the default — measured identical speed for the 320 ms streaming
         // windows (encoder is launch/IO-bound, not compute-bound).
@@ -287,12 +291,10 @@ fn build_session(path: &Path, use_gpu: bool) -> Result<ort::session::Session, St
                 }
             }
         } else if use_cuda {
-            match builder
-                .clone()
-                .with_execution_providers([CUDA::default()
-                    .with_cuda_graph(true)
-                    .with_prefer_nhwc(true)
-                    .build()])
+            match builder.clone().with_execution_providers([CUDA::default()
+                .with_cuda_graph(true)
+                .with_prefer_nhwc(true)
+                .build()])
             {
                 Ok(mut cuda) => match cuda.commit_from_file(path) {
                     Ok(session) => {
@@ -306,9 +308,7 @@ fn build_session(path: &Path, use_gpu: bool) -> Result<ort::session::Session, St
                     }
                 },
                 Err(e) => {
-                    crate::app::debug_log(&format!(
-                        "nemotron: CUDA unavailable ({e}), using CPU"
-                    ));
+                    crate::app::debug_log(&format!("nemotron: CUDA unavailable ({e}), using CPU"));
                 }
             }
         }
@@ -454,8 +454,8 @@ impl<'a> Stream<'a> {
             CONV_CACHE_SIZE as i64,
         ];
 
-        let t_mel =
-            ort::value::Tensor::from_array((shape_mel, window.to_vec())).map_err(|e| e.to_string())?;
+        let t_mel = ort::value::Tensor::from_array((shape_mel, window.to_vec()))
+            .map_err(|e| e.to_string())?;
         let t_len = ort::value::Tensor::from_array((vec![1i64], vec![MEL_FRAMES as i32]))
             .map_err(|e| e.to_string())?;
         let t_lang =
@@ -488,16 +488,38 @@ impl<'a> Stream<'a> {
 
         // Outputs: encoded_output, encoded_length, new_pre_cache,
         // new_cache_last_channel, new_cache_last_time, new_cache_last_channel_len
-        let encoded: Vec<f32> = outputs[0].try_extract_tensor::<f32>().map_err(|e| e.to_string())?.1.to_vec();
+        let encoded: Vec<f32> = outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?
+            .1
+            .to_vec();
         let enc_len: usize = {
-            let v: &[i32] = outputs[1].try_extract_tensor::<i32>().map_err(|e| e.to_string())?.1;
+            let v: &[i32] = outputs[1]
+                .try_extract_tensor::<i32>()
+                .map_err(|e| e.to_string())?
+                .1;
             v.first().copied().unwrap_or(0).max(0) as usize
         };
-        self.pre_cache = outputs[2].try_extract_tensor::<f32>().map_err(|e| e.to_string())?.1.to_vec();
-        self.cache_last_channel = outputs[3].try_extract_tensor::<f32>().map_err(|e| e.to_string())?.1.to_vec();
-        self.cache_last_time = outputs[4].try_extract_tensor::<f32>().map_err(|e| e.to_string())?.1.to_vec();
+        self.pre_cache = outputs[2]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?
+            .1
+            .to_vec();
+        self.cache_last_channel = outputs[3]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?
+            .1
+            .to_vec();
+        self.cache_last_time = outputs[4]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?
+            .1
+            .to_vec();
         self.cache_last_channel_len = {
-            let v: &[i32] = outputs[5].try_extract_tensor::<i32>().map_err(|e| e.to_string())?.1;
+            let v: &[i32] = outputs[5]
+                .try_extract_tensor::<i32>()
+                .map_err(|e| e.to_string())?
+                .1;
             v.first().copied().unwrap_or(0)
         };
 
@@ -519,7 +541,8 @@ impl<'a> Stream<'a> {
         }
         self.accumulated.push_str(&emitted);
         if std::env::var_os("VK_NEMOTRON_DEBUG").is_some() {
-            let mean: f32 = encoded.iter().map(|v| v * v).sum::<f32>() / encoded.len().max(1) as f32;
+            let mean: f32 =
+                encoded.iter().map(|v| v * v).sum::<f32>() / encoded.len().max(1) as f32;
             eprintln!(
                 "[nem] window: enc_len={frames} chl_len={} enc_rms={:.3} decode_ms={} enc_ms={}",
                 self.cache_last_channel_len,
@@ -543,15 +566,19 @@ impl<'a> Stream<'a> {
         let outputs = joint
             .run(inputs)
             .map_err(|e| format!("joint run failed: {e}"))?;
-        Ok(outputs[0].try_extract_tensor::<f32>().map_err(|e| e.to_string())?.1.to_vec())
+        Ok(outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| e.to_string())?
+            .1
+            .to_vec())
     }
 
     fn run_decoder_step(&mut self, token: i64) {
         let shape_tok: [i64; 2] = [1, 1];
         let shape_state: [i64; 3] = [DECODER_LAYERS as i64, 1, DECODER_HIDDEN as i64];
         let build = || -> Result<_, String> {
-            let t_tok =
-                ort::value::Tensor::from_array((shape_tok, vec![token])).map_err(|e| e.to_string())?;
+            let t_tok = ort::value::Tensor::from_array((shape_tok, vec![token]))
+                .map_err(|e| e.to_string())?;
             let t_h = ort::value::Tensor::from_array((shape_state, self.dec_h.clone()))
                 .map_err(|e| e.to_string())?;
             let t_c = ort::value::Tensor::from_array((shape_state, self.dec_c.clone()))

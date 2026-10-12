@@ -1,5 +1,5 @@
-pub mod core;
 mod app;
+pub mod core;
 mod downloader;
 mod model_registry;
 mod notify;

@@ -74,8 +74,7 @@ pub fn request_mic_permission() -> MicPermission {
     if status != MicPermission::NotDetermined {
         return status;
     }
-    let block: block2::RcBlock<dyn Fn(Bool) + 'static> =
-        block2::RcBlock::new(|_: Bool| {});
+    let block: block2::RcBlock<dyn Fn(Bool) + 'static> = block2::RcBlock::new(|_: Bool| {});
     unsafe {
         AVCaptureDevice::requestAccessForMediaType_completionHandler(
             AVMediaTypeAudio.unwrap(),

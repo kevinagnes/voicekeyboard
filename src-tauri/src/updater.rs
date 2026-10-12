@@ -3,7 +3,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const RELEASE_API_URL: &str = "https://api.github.com/repos/kevinagnes/voicekeyboard/releases/latest";
+pub const RELEASE_API_URL: &str =
+    "https://api.github.com/repos/kevinagnes/voicekeyboard/releases/latest";
 pub const APP_NAME: &str = "VoiceKeyboard";
 
 #[derive(Debug, Clone)]
@@ -66,7 +67,9 @@ pub fn check() -> Result<Option<UpdateInfo>, String> {
     if !resp.status().is_success() {
         return Err(format!("update check failed: HTTP {}", resp.status()));
     }
-    let body = resp.text().map_err(|e| format!("update check: read error: {e}"))?;
+    let body = resp
+        .text()
+        .map_err(|e| format!("update check: read error: {e}"))?;
     let release: GithubRelease =
         serde_json::from_str(&body).map_err(|e| format!("update check: bad response: {e}"))?;
 
@@ -96,7 +99,10 @@ pub fn update_dir() -> PathBuf {
 }
 
 /// Download the DMG to `update_dir()` with progress callbacks.
-pub fn download(info: &UpdateInfo, progress: impl Fn(u64, u64) + Send + 'static) -> Result<PathBuf, String> {
+pub fn download(
+    info: &UpdateInfo,
+    progress: impl Fn(u64, u64) + Send + 'static,
+) -> Result<PathBuf, String> {
     if info.dmg_url.is_empty() {
         return Err("release has no DMG asset".to_string());
     }
@@ -149,12 +155,7 @@ pub fn download(info: &UpdateInfo, progress: impl Fn(u64, u64) + Send + 'static)
 /// Path of the currently running .app bundle (three levels above the binary).
 pub fn current_app_bundle() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    Some(
-        exe.parent()?
-            .parent()?
-            .parent()?
-            .to_path_buf(),
-    )
+    Some(exe.parent()?.parent()?.parent()?.to_path_buf())
 }
 
 pub fn is_running_from_mounted_dmg() -> bool {
@@ -176,12 +177,7 @@ pub fn stage_and_install(dmg: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&mount_point).map_err(|e| e.to_string())?;
 
     let attach = Command::new("hdiutil")
-        .args([
-            "attach",
-            "-nobrowse",
-            "-readonly",
-            "-mountpoint",
-        ])
+        .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
         .arg(&mount_point)
         .arg(dmg)
         .output()
@@ -195,12 +191,14 @@ pub fn stage_and_install(dmg: &Path) -> Result<(), String> {
 
     let new_app = mount_point.join(format!("{APP_NAME}.app"));
     if !new_app.exists() {
-        let _ = Command::new("hdiutil").args(["detach"]).arg(&mount_point).status();
+        let _ = Command::new("hdiutil")
+            .args(["detach"])
+            .arg(&mount_point)
+            .status();
         return Err(format!("mounted DMG does not contain {APP_NAME}.app"));
     }
 
-    let current = current_app_bundle()
-        .ok_or("cannot determine current app bundle path")?;
+    let current = current_app_bundle().ok_or("cannot determine current app bundle path")?;
     let _install_dir = current
         .parent()
         .map(|p| p.to_path_buf())
@@ -219,7 +217,10 @@ pub fn stage_and_install(dmg: &Path) -> Result<(), String> {
     }
 
     // Detach the DMG now that we have a copy.
-    let _ = Command::new("hdiutil").args(["detach"]).arg(&mount_point).status();
+    let _ = Command::new("hdiutil")
+        .args(["detach"])
+        .arg(&mount_point)
+        .status();
 
     // Detached installer: wait for us to exit, swap bundles, relaunch.
     let installer = update_dir().join("install.sh");
@@ -234,7 +235,10 @@ pub fn stage_and_install(dmg: &Path) -> Result<(), String> {
         staged = staged.display(),
     );
     std::fs::write(&installer, script).map_err(|e| e.to_string())?;
-    let _ = std::process::Command::new("chmod").arg("+x").arg(&installer).status();
+    let _ = std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(&installer)
+        .status();
     let _ = std::process::Command::new("nohup")
         .arg(&installer)
         .stdin(std::process::Stdio::null())
@@ -264,7 +268,10 @@ mod tests {
     #[ignore]
     fn live_github_check() {
         match check() {
-            Ok(Some(i)) => println!("UPDATE: {} -> {} ({})", i.current_version, i.latest_version, i.dmg_url),
+            Ok(Some(i)) => println!(
+                "UPDATE: {} -> {} ({})",
+                i.current_version, i.latest_version, i.dmg_url
+            ),
             Ok(None) => println!("UP TO DATE"),
             Err(e) => println!("ERR: {e}"),
         }

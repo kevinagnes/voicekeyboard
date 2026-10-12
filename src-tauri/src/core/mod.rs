@@ -1,8 +1,10 @@
 pub mod capture;
+pub mod gemini;
 pub mod hotkey;
 pub mod mic;
 pub mod nemotron;
 pub mod paste;
+pub mod sessions;
 pub mod settings;
 pub mod sounds;
 pub mod stt;

@@ -6,7 +6,7 @@
 #[cfg(target_os = "macos")]
 pub fn show(title: &str, body: &str) {
     use objc2::runtime::Bool;
-    use objc2_foundation::{NSString, NSError};
+    use objc2_foundation::{NSError, NSString};
     use objc2_user_notifications::{
         UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
         UNUserNotificationCenter,
@@ -19,11 +19,8 @@ pub fn show(title: &str, body: &str) {
     content.setBody(&NSString::from_str(body));
 
     let identifier = NSString::from_str("voicekeyboard-notification");
-    let req = UNNotificationRequest::requestWithIdentifier_content_trigger(
-        &identifier,
-        &content,
-        None,
-    );
+    let req =
+        UNNotificationRequest::requestWithIdentifier_content_trigger(&identifier, &content, None);
 
     let request_auth: block2::RcBlock<dyn Fn(Bool, *mut NSError) + 'static> =
         block2::RcBlock::new(|_: Bool, _: *mut NSError| {});

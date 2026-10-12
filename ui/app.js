@@ -2,7 +2,7 @@ const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 
 const $ = (id) => document.getElementById(id);
-const state = { settings: null, capturing: false };
+const state = { settings: null, capturing: false, sessionSelected: null };
 
 function switchTab(name) {
   document.querySelectorAll(".tab").forEach((b) => {
@@ -25,7 +25,10 @@ async function refreshStatus() {
       el.textContent = "Transcribing…";
     } else {
       el.className = "status ok";
-      el.textContent = `Ready — hold ${status.hotkey} to record`;
+      const llm = status.llmHotkey
+        ? ` · ${status.llmHotkey} to ask Gemini`
+        : "";
+      el.textContent = `Ready — hold ${status.hotkey} to record${llm}`;
     }
     $("hotkeyHint").textContent = status.hotkey;
   } catch (e) {
@@ -158,6 +161,161 @@ async function refreshRecent() {
   } catch (e) {
     // recent not available yet
   }
+}
+
+function fmtWhen(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (sameDay) return time;
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return `yesterday ${time}`;
+  return `${d.toLocaleDateString()} ${time}`;
+}
+
+function messageCount(n) {
+  return n === 1 ? "1 message" : `${n} messages`;
+}
+
+async function refreshSessions() {
+  let sessions;
+  try {
+    sessions = await invoke("list_sessions");
+  } catch (e) {
+    return;
+  }
+  const active = sessions.find((s) => s.active);
+  $("sessionsHint").textContent = active
+    ? `Active: “${active.title}”. New questions continue this session — use “New session” for a clean context.`
+    : "Active: new session — the next question starts a clean context.";
+
+  const list = $("sessionList");
+  list.innerHTML = "";
+  if (!sessions.length) {
+    list.innerHTML = '<div class="hint">No sessions yet. Hold the ask-Gemini hotkey and speak a question.</div>';
+  }
+  for (const s of sessions) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "session-item" + (s.active ? " active" : "");
+    const title = document.createElement("span");
+    title.className = "session-item-title";
+    title.textContent = s.title;
+    if (s.active) {
+      const badge = document.createElement("span");
+      badge.className = "badge active";
+      badge.textContent = "active";
+      title.appendChild(badge);
+    }
+    const meta = document.createElement("span");
+    meta.className = "session-item-meta";
+    meta.textContent = `${messageCount(s.turns)} · ${fmtWhen(s.updatedAt)}`;
+    item.appendChild(title);
+    item.appendChild(meta);
+    item.addEventListener("click", () => selectSession(s.id));
+    list.appendChild(item);
+  }
+
+  if (state.sessionSelected) {
+    if (sessions.some((s) => s.id === state.sessionSelected)) {
+      await loadSessionDetail(state.sessionSelected);
+    } else {
+      state.sessionSelected = null;
+      $("sessionDetailCard").hidden = true;
+    }
+  }
+}
+
+async function selectSession(id) {
+  state.sessionSelected = id;
+  await loadSessionDetail(id);
+}
+
+async function loadSessionDetail(id) {
+  let session;
+  try {
+    session = await invoke("get_session", { id });
+  } catch (e) {
+    session = null;
+  }
+  if (!session) {
+    state.sessionSelected = null;
+    $("sessionDetailCard").hidden = true;
+    return;
+  }
+  $("sessionDetailCard").hidden = false;
+  $("sessionDetailTitle").textContent = session.title;
+  $("sessionActiveBadge").hidden = !session.active;
+  $("sessionDetailMeta").textContent =
+    `Created ${fmtWhen(session.createdAt)} · ${messageCount(session.turns.length)} · last activity ${fmtWhen(session.updatedAt)}`;
+  $("sessionUse").hidden = session.active;
+  $("sessionRenameRow").hidden = true;
+
+  const turns = $("sessionTurns");
+  turns.innerHTML = "";
+  for (const t of session.turns) {
+    const row = document.createElement("div");
+    row.className = `session-turn ${t.role === "user" ? "user" : "gemini"}`;
+    const who = document.createElement("div");
+    who.className = "session-turn-who";
+    who.textContent = `${t.role === "user" ? "You" : "Gemini"} · ${fmtWhen(t.at)}`;
+    const text = document.createElement("div");
+    text.className = "session-turn-text";
+    text.textContent = t.text;
+    row.appendChild(who);
+    row.appendChild(text);
+    turns.appendChild(row);
+  }
+}
+
+async function newSession() {
+  try {
+    await invoke("new_session");
+  } catch (e) {
+    return;
+  }
+  state.sessionSelected = null;
+  $("sessionDetailCard").hidden = true;
+  await refreshSessions();
+}
+
+async function renameSelectedSession() {
+  if (!state.sessionSelected) return;
+  const title = $("sessionRenameInput").value.trim();
+  try {
+    await invoke("rename_session", { id: state.sessionSelected, title });
+  } catch (e) {
+    return;
+  }
+  $("sessionRenameRow").hidden = true;
+  await refreshSessions();
+}
+
+let deleteArmed = false;
+function deleteSelectedSession() {
+  if (!state.sessionSelected) return;
+  const btn = $("sessionDelete");
+  if (!deleteArmed) {
+    deleteArmed = true;
+    btn.textContent = "Confirm delete";
+    setTimeout(() => {
+      deleteArmed = false;
+      btn.textContent = "Delete";
+    }, 2500);
+    return;
+  }
+  deleteArmed = false;
+  btn.textContent = "Delete";
+  invoke("delete_session", { id: state.sessionSelected })
+    .then(() => {
+      state.sessionSelected = null;
+      $("sessionDetailCard").hidden = true;
+      return refreshSessions();
+    })
+    .catch(() => {});
 }
 
 function fmtBytes(n) {
@@ -334,9 +492,9 @@ const MODIFIER_CODES = new Set([
   "MetaLeft", "MetaRight",
 ]);
 
-function startHotkeyCapture() {
+function startHotkeyCapture(inputId, buttonId, settingsKey) {
   state.capturing = true;
-  const btn = $("captureHotkey");
+  const btn = $(buttonId);
   btn.textContent = "Press keys… (Esc to cancel)";
 
   const held = { ctrl: false, alt: false, cmd: false, shift: false };
@@ -367,8 +525,8 @@ function startHotkeyCapture() {
       return;
     }
     const spec = buildSpec(code);
-    $("hotkey").value = spec;
-    state.settings.hotkey = spec;
+    $(inputId).value = spec;
+    state.settings[settingsKey] = spec;
     markDirty();
     finish();
   };
@@ -398,6 +556,90 @@ function markDirty() {
   $("saved").hidden = true;
 }
 
+function fillSingleOption(sel, value) {
+  sel.innerHTML = "";
+  if (!value) return;
+  const opt = document.createElement("option");
+  opt.value = value;
+  opt.textContent = value;
+  opt.selected = true;
+  sel.appendChild(opt);
+}
+
+function populateSelect(sel, items, current) {
+  sel.innerHTML = "";
+  const values = items.includes(current) ? items : [current, ...items].filter(Boolean);
+  for (const v of values) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = v;
+    opt.selected = v === current;
+    sel.appendChild(opt);
+  }
+}
+
+function populateVoiceSelect(voices, current) {
+  const sel = $("ttsVoice");
+  sel.innerHTML = "";
+  const groups = new Map();
+  for (const v of voices) {
+    const lang = v.languages && v.languages.length ? v.languages[0] : "Other";
+    if (!groups.has(lang)) groups.set(lang, []);
+    const detail = [v.persona, v.gender].filter(Boolean).join(", ");
+    groups.get(lang).push({ id: v.id, label: detail ? `${v.id} — ${detail}` : v.id });
+  }
+  const langPref = (state.settings.language || "en").split("-")[0];
+  const sortedLangs = [...groups.keys()].sort((a, b) => {
+    const pa = a.toLowerCase().startsWith(langPref) ? 0 : 1;
+    const pb = b.toLowerCase().startsWith(langPref) ? 0 : 1;
+    return pa - pb || a.localeCompare(b);
+  });
+  let selected = false;
+  for (const lang of sortedLangs) {
+    const group = document.createElement("optgroup");
+    group.label = lang;
+    for (const v of groups.get(lang)) {
+      const opt = document.createElement("option");
+      opt.value = v.id;
+      opt.textContent = v.label;
+      if (!selected && v.id === current) {
+        opt.selected = true;
+        selected = true;
+      }
+      group.appendChild(opt);
+    }
+    sel.appendChild(group);
+  }
+  if (!selected && sel.options.length) sel.options[0].selected = true;
+}
+
+async function loadGeminiCatalog() {
+  const btn = $("loadCatalog");
+  const status = $("catalogStatus");
+  btn.disabled = true;
+  status.textContent = "Loading…";
+  try {
+    const catalog = await invoke("get_gemini_catalog", {
+      apiKey: $("geminiKey").value || null,
+      language: $("language").value || null,
+    });
+    populateSelect($("llmModel"), catalog.chatModels, state.settings.llmModel);
+    populateSelect($("ttsModel"), catalog.ttsModels, state.settings.ttsModel);
+    populateVoiceSelect(catalog.voices, state.settings.ttsVoice);
+    state.settings.llmModel = $("llmModel").value;
+    state.settings.ttsModel = $("ttsModel").value;
+    state.settings.ttsVoice = $("ttsVoice").value;
+    const lang = $("language").value;
+    const langLabel = LANGUAGE_LABELS[lang] || lang || "all languages";
+    status.textContent = `Loaded ${catalog.chatModels.length} LLM models, ${catalog.ttsModels.length} TTS models, ${catalog.voices.length} voices (${langLabel})`;
+    markDirty();
+  } catch (e) {
+    status.textContent = `Failed: ${e}`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function save() {
   const el = $("hotkey");
   state.settings.hotkey = el.value.trim();
@@ -409,6 +651,13 @@ async function save() {
   state.settings.maxRecordingSecs = parseInt($("maxSecs").value, 10) || 120;
   state.settings.inputDevice = $("inputDevice").value;
   state.settings.autoUpdate = $("autoUpdate").checked;
+  state.settings.llmHotkey = $("llmHotkey").value.trim();
+  state.settings.geminiApiKey = $("geminiKey").value.trim();
+  state.settings.llmModel = $("llmModel").value;
+  state.settings.ttsModel = $("ttsModel").value;
+  state.settings.ttsVoice = $("ttsVoice").value;
+  state.settings.llmSystemPrompt = $("llmPrompt").value;
+  state.settings.sessionLimit = parseInt($("sessionLimit").value, 10) || 30;
 
   try {
     await invoke("update_settings", { settings: state.settings });
@@ -429,17 +678,72 @@ async function init() {
   $("maxSecs").value = state.settings.maxRecordingSecs;
   $("inputDevice").value = state.settings.inputDevice || "";
   $("autoUpdate").checked = state.settings.autoUpdate !== false;
+  $("llmHotkey").value = state.settings.llmHotkey || "";
+  $("geminiKey").value = state.settings.geminiApiKey || "";
+  $("llmPrompt").value = state.settings.llmSystemPrompt || "";
+  $("sessionLimit").value = state.settings.sessionLimit || 30;
+  fillSingleOption($("llmModel"), state.settings.llmModel);
+  fillSingleOption($("ttsModel"), state.settings.ttsModel);
+  fillSingleOption($("ttsVoice"), state.settings.ttsVoice);
 
-  $("captureHotkey").addEventListener("click", startHotkeyCapture);
+  $("loadCatalog").addEventListener("click", loadGeminiCatalog);
+
+  $("captureHotkey").addEventListener("click", () =>
+    startHotkeyCapture("hotkey", "captureHotkey", "hotkey"),
+  );
+  $("captureLlmHotkey").addEventListener("click", () =>
+    startHotkeyCapture("llmHotkey", "captureLlmHotkey", "llmHotkey"),
+  );
   $("hotkey").addEventListener("change", (e) => {
     state.settings.hotkey = e.target.value.trim();
+    markDirty();
+  });
+  $("llmHotkey").addEventListener("change", (e) => {
+    state.settings.llmHotkey = e.target.value.trim();
     markDirty();
   });
   $("inputDevice").addEventListener("change", (e) => {
     state.settings.inputDevice = e.target.value;
     markDirty();
   });
+  $("language").addEventListener("change", () => {
+    markDirty();
+    // Voice lists are pre-filtered by the selected language.
+    if ($("geminiKey").value || state.settings.geminiApiKey) {
+      loadGeminiCatalog();
+    }
+  });
+  ["llmModel", "ttsModel", "ttsVoice"].forEach((id) => {
+    $(id).addEventListener("change", markDirty);
+  });
+  $("sessionLimit").addEventListener("change", markDirty);
   $("save").addEventListener("click", save);
+
+  $("newSession").addEventListener("click", newSession);
+  $("sessionUse").addEventListener("click", async () => {
+    if (!state.sessionSelected) return;
+    try {
+      await invoke("set_active_session", { id: state.sessionSelected });
+    } catch (e) {
+      return;
+    }
+    await refreshSessions();
+  });
+  $("sessionRename").addEventListener("click", () => {
+    $("sessionRenameInput").value = $("sessionDetailTitle").textContent;
+    $("sessionRenameRow").hidden = false;
+    $("sessionRenameInput").focus();
+    $("sessionRenameInput").select();
+  });
+  $("sessionRenameSave").addEventListener("click", renameSelectedSession);
+  $("sessionRenameCancel").addEventListener("click", () => {
+    $("sessionRenameRow").hidden = true;
+  });
+  $("sessionRenameInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") renameSelectedSession();
+    if (e.key === "Escape") $("sessionRenameRow").hidden = true;
+  });
+  $("sessionDelete").addEventListener("click", deleteSelectedSession);
 
   document.querySelectorAll(".tab").forEach((b) => {
     b.addEventListener("click", () => switchTab(b.dataset.tab));
@@ -581,6 +885,20 @@ async function init() {
     refreshStatus();
     addActivity("Skipped — password field detected", "warn");
   });
+  listen("llm-status", (e) => {
+    const s = (e && e.payload) || {};
+    if (s.phase === "done") {
+      addActivity(`Gemini: ${s.reply ? s.reply.slice(0, 120) : "…"}`, "ok");
+    } else if (s.phase === "error") {
+      addActivity(`Gemini error: ${s.error || "unknown"}`, "err");
+    } else if (s.phase === "cancelled") {
+      addActivity("Ask Gemini cancelled", "warn");
+    } else if (s.phase === "listening") {
+      addActivity("Ask Gemini — speak your question", "rec");
+    }
+  });
+  listen("llm-session", refreshSessions);
+  listen("open-sessions", () => switchTab("sessions"));
   listen("paste-failed", (e) => {
     refreshStatus();
     addActivity(e.payload || "Failed to paste — text copied to clipboard", "err");
@@ -602,6 +920,7 @@ async function init() {
   await refreshUpdateStatus();
   await refreshStats();
   await refreshRecent();
+  await refreshSessions();
   await refreshStatus();
 }
 

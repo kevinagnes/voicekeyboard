@@ -24,9 +24,7 @@ pub struct InferenceStats {
 }
 
 enum Backend {
-    Whisper {
-        ctx: Mutex<Option<WhisperContext>>,
-    },
+    Whisper { ctx: Mutex<Option<WhisperContext>> },
     Nemotron(Mutex<Option<NemotronEngine>>),
 }
 
@@ -111,7 +109,8 @@ impl SttEngine {
                 self.total_runs.fetch_add(1, Ordering::Relaxed);
                 self.total_ms.fetch_add(elapsed, Ordering::Relaxed);
                 let n_segments = result.text.split_whitespace().count() as i32;
-                self.total_segments.fetch_add(n_segments as u64, Ordering::Relaxed);
+                self.total_segments
+                    .fetch_add(n_segments as u64, Ordering::Relaxed);
                 Ok(Transcription {
                     text: result.text,
                     language: result.language,
@@ -153,7 +152,10 @@ impl SttEngine {
                     id if id >= 0 => ctx
                         .token_to_str(ctx.token_lang(id))
                         .ok()
-                        .map(|s| s.trim_matches(|c| c == '<' || c == '|' || c == '>').to_string())
+                        .map(|s| {
+                            s.trim_matches(|c| c == '<' || c == '|' || c == '>')
+                                .to_string()
+                        })
                         .unwrap_or_else(|| "auto".to_string()),
                     _ => "auto".to_string(),
                 };

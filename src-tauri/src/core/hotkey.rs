@@ -26,7 +26,10 @@ pub fn code_from_str(s: &str) -> Result<Code, HotkeyError> {
         "fn" => Err(HotkeyError::UnsupportedKey(
             "Fn is not exposed to the global hotkey API on macOS".to_string(),
         )),
-        _ => s.trim().parse().map_err(|_| HotkeyError::UnsupportedKey(s.trim().to_string())),
+        _ => s
+            .trim()
+            .parse()
+            .map_err(|_| HotkeyError::UnsupportedKey(s.trim().to_string())),
     }
 }
 
@@ -67,7 +70,8 @@ pub fn is_combo(spec: &str) -> bool {
 
 pub struct HotkeyController {
     manager: global_hotkey::GlobalHotKeyManager,
-    current: Option<HotKey>,
+    record: Option<HotKey>,
+    llm: Option<HotKey>,
 }
 
 // On Windows GlobalHotKeyManager holds a raw HWND whose register/unregister/drop
@@ -77,32 +81,56 @@ unsafe impl Send for HotkeyController {}
 
 impl HotkeyController {
     pub fn new() -> Result<Self, HotkeyError> {
-        let manager =
-            global_hotkey::GlobalHotKeyManager::new().map_err(|e| HotkeyError::Register(e.to_string()))?;
+        let manager = global_hotkey::GlobalHotKeyManager::new()
+            .map_err(|e| HotkeyError::Register(e.to_string()))?;
         Ok(Self {
             manager,
-            current: None,
+            record: None,
+            llm: None,
         })
     }
 
-    pub fn current_spec(&self) -> Option<String> {
-        self.current.map(|hk| hk.to_string())
-    }
-
+    /// Register (or rebind) the hold-to-record hotkey.
     pub fn rebind(&mut self, spec: &str) -> Result<(), HotkeyError> {
         let hotkey = parse(spec)?;
-        if let Some(prev) = self.current.take() {
+        if let Some(prev) = self.record.take() {
             let _ = self.manager.unregister(prev);
         }
         self.manager
             .register(hotkey)
             .map_err(|e| HotkeyError::Register(e.to_string()))?;
-        self.current = Some(hotkey);
+        self.record = Some(hotkey);
         Ok(())
     }
 
+    /// Register (or rebind) the hold-to-record "Ask LLM" hotkey.
+    pub fn rebind_llm(&mut self, spec: &str) -> Result<(), HotkeyError> {
+        let hotkey = parse(spec)?;
+        if let Some(prev) = self.llm.take() {
+            let _ = self.manager.unregister(prev);
+        }
+        self.manager
+            .register(hotkey)
+            .map_err(|e| HotkeyError::Register(e.to_string()))?;
+        self.llm = Some(hotkey);
+        Ok(())
+    }
+
+    /// Id of the registered record hotkey, if any.
+    pub fn record_id(&self) -> Option<u32> {
+        self.record.map(|hk| hk.id())
+    }
+
+    /// Id of the registered "Ask LLM" hotkey, if any.
+    pub fn llm_id(&self) -> Option<u32> {
+        self.llm.map(|hk| hk.id())
+    }
+
     pub fn unregister(&mut self) {
-        if let Some(prev) = self.current.take() {
+        if let Some(prev) = self.record.take() {
+            let _ = self.manager.unregister(prev);
+        }
+        if let Some(prev) = self.llm.take() {
             let _ = self.manager.unregister(prev);
         }
     }

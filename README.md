@@ -4,6 +4,11 @@ A local, offline-first push-to-talk dictation app (macOS, v1). While any text fi
 focused, **hold a hotkey → speak → release** and the transcript is pasted instantly into the
 field. 100% on-device — no audio leaves your machine.
 
+A second hotkey (**Ask Gemini**, default `ctrl+ShiftRight`) turns dictation into a voice
+assistant: **hold → speak a question → release**, and the transcript is sent to the Gemini
+LLM; the answer is spoken aloud (Gemini TTS) and shown on an on-screen panel together with
+what you said. This flow requires a Gemini API key and sends your text + audio to Google.
+
 Implements the spec in [`prompt.md`](prompt.md).
 
 Technology: https://doc.rust-lang.org/stable/cargo/
@@ -12,14 +17,15 @@ Technology: https://doc.rust-lang.org/stable/cargo/
 
 | Component | File | Responsibility |
 |---|---|---|
-| Hotkey | `src-tauri/src/core/hotkey.rs` | Global hold/release hotkey (Carbon `RegisterEventHotKey`), combo parsing, rebinding |
+| Hotkey | `src-tauri/src/core/hotkey.rs` | Global hold/release hotkeys (Carbon `RegisterEventHotKey`), combo parsing, rebinding (record + ask-LLM) |
 | Capture | `src-tauri/src/core/capture.rs` | `cpal` mic → 16 kHz mono ring buffer, streaming resampler, silence trim |
 | STT | `src-tauri/src/core/stt.rs` | `whisper-rs` (whisper.cpp + Metal) engine, language auto/override, initial prompt |
+| Gemini | `src-tauri/src/core/gemini.rs` | Ask-LLM client: chat grounded in **Google Search** (generateContent `google_search` tool, sources from `groundingMetadata`), **streaming** Interactions-API TTS (SSE `step.delta`, 24 kHz PCM), models/voices catalog (`language_code`-filtered) |
 | Paste | `src-tauri/src/core/paste.rs` | Clipboard save → set → Cmd/Ctrl+V → restore; secure-field guard; text sanitize |
-| Sounds | `src-tauri/src/core/sounds.rs` | Synthesized chimes (start / done), mute toggle |
+| Sounds | `src-tauri/src/core/sounds.rs` | Synthesized chimes + **streaming speech playback** (stateful resampler, noise-tail trim, cancellable), mute toggle |
 | Settings | `src-tauri/src/core/settings.rs` | Persisted JSON settings (`~/Library/Application Support/.../settings.json`) |
 | Registry/Download | `src-tauri/src/model_registry.rs`, `src-tauri/src/downloader.rs` | Model catalog, resumable download with retry/backoff + checksum verify |
-| Shell | `src-tauri/src/app.rs` | Menu-bar tray, state machine, Tauri commands/events, worker threads |
+| Shell | `src-tauri/src/app.rs` | Menu-bar tray, state machine, Tauri commands/events, worker threads, LLM overlay window |
 
 ## Run (dev)  
 
@@ -102,6 +108,9 @@ retried with exponential backoff. It is cached in the app data dir.
   (`RegisterEventHotKey`), so no app can bind it. `ShiftRight` is a rarely-used key (per the
   spec's own conflict-mitigation guidance) and is fully rebindable in Settings — including
   combos such as `ctrl+KeyG`.
+- **Ask-LLM hotkey defaults to `ctrl+ShiftRight`** (hold → speak → release → Gemini replies
+  by voice). Fully rebindable in Settings. Gemini defaults: `gemini-3.1-flash-lite` for the
+  LLM, `gemini-3.8-flash-tts` / voice `Kore` for speech, both editable in Settings.
 - Model/language defaults per D3/D5: `large-v3-turbo` q8_0, language auto-detected with
   `en`/`pt` override.
 
@@ -110,11 +119,46 @@ retried with exponential backoff. It is cached in the app data dir.
 - Ignore recordings shorter than 300 ms (configurable).
 - Recordings capped at 120 s (configurable); capture is trimmed of leading/trailing silence
   before inference (reduces hallucination).
-- While an utterance is being transcribed, a new recording is blocked (brief).
+- While an utterance is being transcribed (or an Ask-Gemini reply is being spoken), a new
+  recording is blocked (brief).
 - **Password fields are detected** (macOS AX `AXSecureTextField`) and the transcript is
   silently discarded — no paste, no chime, no notification.
 - Clipboard is saved before paste and restored ~1 s after.
-- No telemetry, no network calls other than the model download, no logs of transcripts.
+- **Ask Gemini** shows a floating panel: live mic level while you speak, then your transcript
+  and the LLM's reply. The reply is **streamed** through the speakers as Gemini synthesizes
+  it (24 kHz `audio/l16` SSE, resampled on-device) — first audio arrives long before the
+  reply is complete. The panel has a **Cancel** button and **Esc** cancels the current
+  recording or stops the spoken reply; the pipeline aborts between phases and the panel
+  shows "Cancelling…" immediately even while a blocking transcribe/search call is still
+  unwinding. The transcript and reply also appear in the Settings Activity log.
+- **Gemini TTS end-of-audio noise**: the Gemini TTS API is known to append a static/white
+  noise burst at the end of generated audio (upstream artifact, reported for multiple
+  `*-tts` models). VoiceKeyboard keeps the last second of audio in a buffer and trims
+  trailing silence / noise bursts (windowed RMS + zero-crossing detection) before playing
+  it.
+- **News & web search**: ask "what's the news about X?" — Gemini's built-in **Grounding
+  with Google Search** (`google_search` tool) decides on its own when the question needs
+  current information, searches Google and grounds the answer in the results. The sources
+  behind the answer are shown as chips on the panel. No API key beyond Gemini and no HTML
+  scraping; models that predate grounding fall back to answering from model knowledge.
+- **Models & voices**: after entering an API key, "Load models & voices…" fetches the
+  catalog (`/v1beta/models` + `/v1beta/voices`); the LLM model, TTS model and TTS voice
+  become pickers. **Voices are pre-filtered by the selected language** (e.g. `pt` →
+  `pt-BR`, `en` → `en-US`) and re-loaded automatically when you change the language;
+  groups still label each voice's language, and the list falls back to all voices if a
+  language has none.
+- **Sessions**: every Ask-Gemini interaction belongs to a session that can be recalled
+  and continued. The next question always continues the active session, with the whole
+  conversation replayed to Gemini for context. A **Sessions** submenu in the menu bar
+  lists recent sessions ("New Session (clean context)" plus the last 12), and a
+  **Sessions tab in Settings** lets you read, rename, delete, or continue any session.
+  While the panel is listening, its **+ New session** button switches the question you
+  are speaking into a fresh context. Sessions are stored in `sessions.json` in the app
+  data dir ("Keep last N sessions" in Settings, default 30, prunes the oldest).
+- Requires a Gemini API key (Settings → AI Assistant); the API key is stored in the local
+  `settings.json`.
+- No telemetry, no logs of transcripts. The only network calls are the model download and,
+  when used, the Gemini API (the Ask-LLM hotkey).
 
 ## Tests
 
@@ -124,7 +168,8 @@ cargo test
 ```
 
 Unit tests cover hotkey parsing, ring buffer, resampler, silence trim, sanitize, chime
-synthesis, registry parsing, and SHA-256 verification.
+synthesis, registry parsing, SHA-256 verification, and the session store (titles,
+pruning, recall).
 
 ## Roadmap (per spec)
 

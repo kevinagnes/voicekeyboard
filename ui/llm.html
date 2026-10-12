@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ask Gemini</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        overflow: hidden;
+        -webkit-user-select: none;
+        user-select: none;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      #panel {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 14px 16px 12px;
+        border-radius: 16px;
+        background: rgba(16, 18, 22, 0.82);
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: rgba(255, 255, 255, 0.92);
+        box-sizing: border-box;
+      }
+      #header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 10px;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+        color: rgba(255, 255, 255, 0.9);
+      }
+      #dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #ff3b30;
+      }
+      #phase {
+        color: rgba(255, 255, 255, 0.55);
+        font-weight: 500;
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #sessionTitle {
+        max-width: 150px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 500;
+        color: rgba(255, 255, 255, 0.45);
+      }
+      #newSessionBtn {
+        display: none;
+        padding: 4px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        border-radius: 999px;
+        background: rgba(79, 140, 255, 0.16);
+        color: rgba(255, 255, 255, 0.9);
+        font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        cursor: pointer;
+        -webkit-app-region: no-drag;
+      }
+      #newSessionBtn:hover {
+        background: rgba(79, 140, 255, 0.32);
+      }
+      #newSessionBtn:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      #history {
+        display: none;
+        flex-direction: column;
+        gap: 4px;
+        flex: 0 1 auto;
+        min-height: 0;
+        max-height: 55%;
+        overflow-y: auto;
+        margin-bottom: 8px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      #panel > .row {
+        flex-shrink: 0;
+      }
+      .hist-row {
+        display: flex;
+        gap: 8px;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+      .hist-who {
+        min-width: 46px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.35);
+        padding-top: 1px;
+      }
+      .hist-row.you .hist-who {
+        color: rgba(122, 200, 255, 0.7);
+      }
+      .hist-row.gemini .hist-who {
+        color: rgba(179, 146, 240, 0.7);
+      }
+      .hist-text {
+        flex: 1;
+        color: rgba(255, 255, 255, 0.65);
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 54px;
+        overflow: hidden;
+      }
+      #historyMore {
+        font-size: 10.5px;
+        color: rgba(255, 255, 255, 0.35);
+        padding: 2px 0 2px 54px;
+      }
+      #cancelBtn {
+        display: none;
+        padding: 4px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        border-radius: 999px;
+        background: rgba(255, 59, 48, 0.18);
+        color: rgba(255, 255, 255, 0.9);
+        font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        cursor: pointer;
+        -webkit-app-region: no-drag;
+      }
+      #cancelBtn:hover {
+        background: rgba(255, 59, 48, 0.35);
+      }
+      #levelbar {
+        height: 4px;
+        width: 120px;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.1);
+        overflow: hidden;
+      }
+      #levelfill {
+        height: 100%;
+        width: 0%;
+        border-radius: 2px;
+        background: linear-gradient(90deg, #4f8cff, #7ac8ff);
+        transition: width 80ms linear;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        margin-top: 8px;
+      }
+      .who {
+        min-width: 58px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.45);
+        padding-top: 2px;
+      }
+      .text {
+        flex: 1;
+        min-height: 16px;
+        font-size: 13.5px;
+        line-height: 1.45;
+        color: rgba(255, 255, 255, 0.95);
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 120px;
+        overflow-y: auto;
+      }
+      .text.placeholder {
+        color: rgba(255, 255, 255, 0.35);
+      }
+      .who.you {
+        color: #7ac8ff;
+      }
+      .who.gemini {
+        color: #b392f0;
+      }
+      #error {
+        display: none;
+        margin-top: 8px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: rgba(255, 59, 48, 0.12);
+        border: 1px solid rgba(255, 59, 48, 0.35);
+        color: #ff8a80;
+        font-size: 12.5px;
+        line-height: 1.4;
+      }
+      .thinking-dots {
+        color: rgba(255, 255, 255, 0.5);
+        font-weight: 600;
+      }
+      .thinking-dots::after {
+        content: "";
+        animation: dots 1.4s steps(4, end) infinite;
+      }
+      @keyframes dots {
+        0% {
+          content: "";
+        }
+        25% {
+          content: ".";
+        }
+        50% {
+          content: "..";
+        }
+        75%,
+        100% {
+          content: "...";
+        }
+      }
+      #speaking {
+        display: none;
+        margin-top: 8px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        color: rgba(255, 255, 255, 0.4);
+      }
+      #speaking::before {
+        content: "● ";
+        color: #34c759;
+        animation: pulse 1s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        50% {
+          opacity: 0.3;
+        }
+      }
+      #sources {
+        display: none;
+        margin-top: 8px;
+        font-size: 11px;
+        line-height: 1.4;
+        color: rgba(255, 255, 255, 0.45);
+      }
+      #sources .source {
+        display: inline-block;
+        margin-right: 8px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="panel">
+      <div id="header">
+        <div id="dot"></div>
+        <span>Ask Gemini</span>
+        <span id="sessionTitle"></span>
+        <span id="phase">Listening…</span>
+        <button id="newSessionBtn">+ New session</button>
+        <button id="cancelBtn">✕ Cancel</button>
+        <div id="levelbar"><div id="levelfill"></div></div>
+      </div>
+      <div id="history"></div>
+      <div class="row">
+        <span class="who you">You</span>
+        <div id="transcript" class="text placeholder">…</div>
+      </div>
+      <div class="row">
+        <span class="who gemini">Gemini</span>
+        <div id="reply" class="text placeholder">…</div>
+      </div>
+      <div id="speaking">Speaking reply</div>
+      <div id="sources"></div>
+      <div id="error"></div>
+    </div>
+    <script src="llm.js"></script>
+  </body>
+</html>
