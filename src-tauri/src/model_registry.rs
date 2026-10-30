@@ -92,4 +92,13 @@ mod tests {
         assert!(r.default_model().unwrap().default);
         assert!(r.models().iter().all(|m| !m.id.is_empty()));
     }
+
+    #[test]
+    fn gemini_transcribe_is_a_cloud_engine() {
+        let r = ModelRegistry::from_embedded();
+        let model = r.find("gemini-3.5-transcribe").expect("gemini stt entry");
+        assert_eq!(model.engine, "gemini");
+        assert_eq!(model.size_bytes, 0);
+        assert!(model.languages.iter().any(|l| l == "auto"));
+    }
 }

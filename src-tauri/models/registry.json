@@ -1,6 +1,6 @@
 {
   "$schema": "VoiceKeyboard model registry",
-  "comment": "Add future models here. Empty checksum skips verification with a warning. Models with a `files` array are multi-file ONNX bundles (engine: nemotron); single-file entries are whisper.cpp GGML models (engine: whisper).",
+  "comment": "Add future models here. Empty checksum skips verification with a warning. Models with a `files` array are multi-file ONNX bundles (engine: nemotron); single-file entries are whisper.cpp GGML models (engine: whisper); engine: gemini entries are cloud models with no download.",
   "models": [
     {
       "id": "large-v3-turbo",
@@ -25,6 +25,22 @@
       "default": false,
       "engine": "whisper",
       "languages": ["auto", "en", "pt"]
+    },
+    {
+      "id": "gemini-3.5-transcribe",
+      "name": "Gemini 3.5 Transcribe (cloud)",
+      "description": "Google's dedicated speech model. Highest accuracy for noisy audio and 100+ languages. No download; audio is sent to Gemini only after you release the hotkey. Requires a Gemini API key.",
+      "filename": "gemini-3.5-transcribe",
+      "url": "",
+      "checksumSha256": "",
+      "sizeBytes": 0,
+      "default": false,
+      "engine": "gemini",
+      "languages": [
+        "auto", "en", "es", "pt", "fr", "de", "it", "nl", "pl", "tr",
+        "ru", "uk", "ja", "ko", "zh", "hi", "ar", "he", "sv", "da",
+        "fi", "no", "cs", "hu", "ro", "el", "th", "vi", "id", "ms"
+      ]
     },
     {
       "id": "nemotron-multilingual",

@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+use super::gemini_stt::GeminiStt;
 use super::nemotron::NemotronEngine;
 
 #[derive(Debug, Clone)]
@@ -26,6 +27,7 @@ pub struct InferenceStats {
 enum Backend {
     Whisper { ctx: Mutex<Option<WhisperContext>> },
     Nemotron(Mutex<Option<NemotronEngine>>),
+    Gemini(GeminiStt),
 }
 
 pub struct SttEngine {
@@ -63,6 +65,7 @@ impl SttEngine {
         match &*self.backend.lock() {
             Backend::Whisper { ctx } => ctx.lock().is_some(),
             Backend::Nemotron(engine) => engine.lock().is_some(),
+            Backend::Gemini(_) => true,
         }
     }
 
@@ -72,6 +75,15 @@ impl SttEngine {
 
     pub fn load_model(&self, path: &str, engine_kind: &str) -> Result<(), String> {
         match engine_kind {
+            "gemini" => {
+                let settings = super::settings::load();
+                let model = if settings.model_id.trim().is_empty() {
+                    super::gemini_stt::DEFAULT_GEMINI_STT_MODEL
+                } else {
+                    settings.model_id.as_str()
+                };
+                *self.backend.lock() = Backend::Gemini(GeminiStt::new(model));
+            }
             "nemotron" => {
                 let engine = NemotronEngine::load(Path::new(path))?;
                 *self.backend.lock() = Backend::Nemotron(Mutex::new(Some(engine)));
@@ -100,6 +112,25 @@ impl SttEngine {
         initial_prompt: &str,
     ) -> Result<Transcription, String> {
         match &*self.backend.lock() {
+            Backend::Gemini(engine) => {
+                let settings = super::settings::load();
+                let start = Instant::now();
+                let result = engine.transcribe(
+                    samples,
+                    language,
+                    initial_prompt,
+                    &settings.gemini_api_key,
+                )?;
+                let elapsed = start.elapsed().as_millis() as u64;
+                self.total_runs.fetch_add(1, Ordering::Relaxed);
+                self.total_ms.fetch_add(elapsed, Ordering::Relaxed);
+                self.total_segments
+                    .fetch_add(result.n_segments.max(0) as u64, Ordering::Relaxed);
+                Ok(Transcription {
+                    inference_ms: elapsed,
+                    ..result
+                })
+            }
             Backend::Nemotron(engine) => {
                 let guard = engine.lock();
                 let engine = guard.as_ref().ok_or("model not loaded")?;
@@ -197,5 +228,14 @@ mod tests {
         let engine = SttEngine::new();
         let err = engine.transcribe(&[0.0f32; 1000], None, "").unwrap_err();
         assert!(err.contains("not loaded"));
+    }
+
+    #[test]
+    fn gemini_backend_loads_without_a_model_file() {
+        let engine = SttEngine::new();
+        engine
+            .load_model("gemini-3.5-transcribe", "gemini")
+            .unwrap();
+        assert!(engine.is_loaded());
     }
 }

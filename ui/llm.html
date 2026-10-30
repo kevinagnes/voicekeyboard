@@ -148,6 +148,53 @@
         background: rgba(255, 255, 255, 0.1);
         overflow: hidden;
       }
+      #dragHandle {
+        cursor: grab;
+        color: rgba(255, 255, 255, 0.4);
+        font-size: 15px;
+        line-height: 1;
+        padding: 0 3px;
+        letter-spacing: -1px;
+      }
+      #dragHandle:active {
+        cursor: grabbing;
+      }
+      #historyToggle {
+        display: none;
+        padding: 2px 9px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.07);
+        color: rgba(255, 255, 255, 0.62);
+        font: 600 10.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        cursor: pointer;
+        -webkit-app-region: no-drag;
+      }
+      #historyToggle:hover {
+        background: rgba(255, 255, 255, 0.14);
+        color: rgba(255, 255, 255, 0.9);
+      }
+      #historyToggle.on {
+        background: rgba(79, 140, 255, 0.25);
+        border-color: rgba(79, 140, 255, 0.5);
+        color: #fff;
+      }
+      #shotChip {
+        display: none;
+        margin: 0 0 8px;
+        padding: 4px 10px;
+        border-radius: 8px;
+        background: rgba(52, 199, 89, 0.12);
+        border: 1px solid rgba(52, 199, 89, 0.3);
+        color: rgba(210, 255, 220, 0.9);
+        font-size: 11.5px;
+        font-weight: 600;
+        width: fit-content;
+      }
+      #transcript,
+      #reply {
+        cursor: pointer;
+      }
       #levelfill {
         height: 100%;
         width: 0%;
@@ -255,31 +302,106 @@
         border-radius: 999px;
         background: rgba(255, 255, 255, 0.08);
       }
+      #plan,
+      #tool,
+      #artifacts {
+        display: none;
+        margin-top: 7px;
+        font-size: 11.5px;
+        line-height: 1.45;
+        color: rgba(255, 255, 255, 0.55);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #plan b,
+      #tool b,
+      #artifacts b {
+        color: rgba(255, 255, 255, 0.8);
+        font-weight: 600;
+      }
+      #permission {
+        display: none;
+        position: absolute;
+        inset: 10px;
+        z-index: 20;
+        flex-direction: column;
+        gap: 8px;
+        padding: 14px;
+        border-radius: 12px;
+        background: rgba(24, 27, 33, 0.98);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
+      }
+      #permission h3 {
+        margin: 0;
+        font-size: 14px;
+      }
+      #permissionDetail {
+        flex: 1;
+        overflow-y: auto;
+        font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre-wrap;
+        color: rgba(255, 255, 255, 0.72);
+      }
+      #permissionButtons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      #permissionButtons button {
+        padding: 6px 12px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        background: rgba(255, 255, 255, 0.08);
+        color: rgba(255, 255, 255, 0.9);
+        font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        cursor: pointer;
+      }
+      #permissionButtons button.primary {
+        background: #2563eb;
+        border-color: #2563eb;
+      }
+      #permissionButtons button.danger {
+        background: rgba(255, 59, 48, 0.2);
+        border-color: rgba(255, 59, 48, 0.5);
+      }
     </style>
   </head>
   <body>
-    <div id="panel">
+    <div id="panel" data-tauri-drag-region="deep">
       <div id="header">
-        <div id="dot"></div>
-        <span>Ask Gemini</span>
-        <span id="sessionTitle"></span>
-        <span id="phase">Listening…</span>
+        <span id="dragHandle" data-tauri-drag-region title="Drag to move">⠿</span>
+        <div id="dot" data-tauri-drag-region></div>
+        <span data-tauri-drag-region>Ask Gemini</span>
+        <span id="sessionTitle" data-tauri-drag-region></span>
+        <button id="historyToggle">History</button>
+        <span id="phase" data-tauri-drag-region>Listening…</span>
         <button id="newSessionBtn">+ New session</button>
         <button id="cancelBtn">✕ Cancel</button>
         <div id="levelbar"><div id="levelfill"></div></div>
       </div>
-      <div id="history"></div>
+      <div id="history" data-tauri-drag-region="false"></div>
+      <div id="shotChip" data-tauri-drag-region="false">📷 Screenshot attached — ask about it</div>
       <div class="row">
         <span class="who you">You</span>
-        <div id="transcript" class="text placeholder">…</div>
+        <div id="transcript" class="text placeholder" data-tauri-drag-region="false" title="Click to expand session history">…</div>
       </div>
       <div class="row">
         <span class="who gemini">Gemini</span>
-        <div id="reply" class="text placeholder">…</div>
+        <div id="reply" class="text placeholder" data-tauri-drag-region="false" title="Click to expand session history">…</div>
       </div>
       <div id="speaking">Speaking reply</div>
+      <div id="plan"></div>
+      <div id="tool"></div>
+      <div id="artifacts"></div>
       <div id="sources"></div>
       <div id="error"></div>
+      <div id="permission" data-tauri-drag-region="false">
+        <h3 id="permissionTitle">Permission</h3>
+        <div id="permissionDetail"></div>
+        <div id="permissionButtons"></div>
+      </div>
     </div>
     <script src="llm.js"></script>
   </body>

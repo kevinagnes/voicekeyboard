@@ -17,6 +17,7 @@
       <button class="tab active" data-tab="setup">Setup</button>
       <button class="tab" data-tab="activity">Activity</button>
       <button class="tab" data-tab="sessions">Sessions</button>
+      <button class="tab" data-tab="agent">Agent</button>
       <button class="tab" data-tab="analytics">Analytics</button>
       <button class="tab" data-tab="updates">Updates</button>
     </nav>
@@ -38,7 +39,7 @@
 
         <section class="card">
           <h2>Model</h2>
-          <p class="hint">Downloaded on first run and cached locally. No audio ever leaves your machine.</p>
+          <p class="hint">Local models are downloaded on first run and cached. Local audio never leaves your machine. <strong>Gemini 3.5 Transcribe</strong> is cloud-only: the utterance is sent to Google when you release the hotkey, and requires the Gemini API key below.</p>
           <div id="models"></div>
           <div id="downloadProgress" class="download" hidden>
             <progress id="downloadBar" value="0" max="1"></progress>
@@ -87,6 +88,11 @@
           <div class="row">
             <input id="llmHotkey" type="text" placeholder="e.g. ctrl+ShiftRight" spellcheck="false" />
             <button id="captureLlmHotkey" class="secondary">Capture keys…</button>
+          </div>
+          <label class="hint" for="screenshotHotkey">Screenshot question hotkey (drag a region, then speak while holding):</label>
+          <div class="row">
+            <input id="screenshotHotkey" type="text" placeholder="e.g. ctrl+Shift+KeyS" spellcheck="false" />
+            <button id="captureShotHotkey" class="secondary">Capture keys…</button>
           </div>
           <div class="row">
             <button id="loadCatalog" class="secondary">Load models &amp; voices…</button>
@@ -174,6 +180,75 @@
             <button id="sessionRenameCancel" class="secondary">Cancel</button>
           </div>
           <div id="sessionTurns" class="session-turns"></div>
+          <div id="sessionPlan" class="agent-plan"></div>
+          <div id="sessionArtifacts" class="agent-artifacts"></div>
+          <div id="sessionTools" class="agent-tools"></div>
+        </section>
+      </section>
+
+      <section id="tab-agent" class="tab-panel" hidden>
+        <section class="card">
+          <h2>Agent runtime</h2>
+          <p class="hint">The assistant is a durable agent now: it can plan, use tools, write workspace files, search the web, remember facts and recover after a restart. Every step is stored in <code>agent.db</code>.</p>
+          <label class="hint" for="workspaceRoot">Workspace folder (empty = app data/workspace)</label>
+          <input id="workspaceRoot" type="text" spellcheck="false" placeholder="D:\Projects\voice-notes" />
+          <div class="grid">
+            <label>Max steps per run
+              <input id="agentMaxSteps" type="number" min="4" max="60" step="1" />
+            </label>
+            <label>Context budget (tokens)
+              <input id="agentContextBudget" type="number" min="8000" max="1000000" step="1000" />
+            </label>
+          </div>
+          <label class="check"><input id="agentDeepWork" type="checkbox" /> Prefer deep work (longer budget, plans, subagents)</label>
+          <label class="check"><input id="agentLogEverything" type="checkbox" /> Store full prompts for debugging</label>
+          <div class="row">
+            <button id="saveAgent" class="primary">Save agent settings</button>
+            <span id="savedAgent" class="saved" hidden>Saved ✓</span>
+            <span id="workspacePath" class="hint"></span>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="session-head">
+            <h2>Runs</h2>
+            <button id="refreshRuns" class="secondary">Refresh</button>
+          </div>
+          <p class="hint">Every execution is a durable run. Open one to see steps, tools, retries and artifacts; undo restores the files it wrote.</p>
+          <div id="runList" class="run-list"></div>
+          <div id="runDetail" class="run-detail" hidden></div>
+        </section>
+
+        <section class="card">
+          <div class="session-head">
+            <h2>Plan &amp; artifacts</h2>
+            <span id="agentSessionLabel" class="hint"></span>
+          </div>
+          <div id="agentPlan" class="agent-plan"></div>
+          <div id="agentArtifacts" class="agent-artifacts"></div>
+        </section>
+
+        <section class="card">
+          <h2>Permissions</h2>
+          <p class="hint">Saved grants are session-scoped. Revoke one to make the assistant ask again.</p>
+          <div id="permissionList" class="permission-list"></div>
+        </section>
+
+        <section class="card">
+          <div class="session-head">
+            <h2>Background jobs</h2>
+            <button id="refreshJobs" class="secondary">Refresh</button>
+          </div>
+          <div class="row">
+            <input id="jobPrompt" type="text" placeholder="A task to run in the background…" />
+            <button id="enqueueJob" class="primary">Start</button>
+          </div>
+          <div id="jobList" class="job-list"></div>
+        </section>
+
+        <section class="card">
+          <h2>Agent metrics</h2>
+          <div class="stats" id="agentStats"></div>
         </section>
       </section>
 

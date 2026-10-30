@@ -6,6 +6,7 @@ use crate::APP_ID;
 
 pub const DEFAULT_HOTKEY: &str = "RightShift";
 pub const DEFAULT_LLM_HOTKEY: &str = "ctrl+ShiftRight";
+pub const DEFAULT_SCREENSHOT_HOTKEY: &str = "ctrl+Shift+KeyS";
 pub const DEFAULT_SESSION_LIMIT: u64 = 30;
 pub const DEFAULT_LANGUAGE: &str = "auto";
 pub const DEFAULT_MODEL_ID: &str = "large-v3-turbo";
@@ -23,6 +24,8 @@ pub const DEFAULT_LLM_SYSTEM_PROMPT: &str =
      to the user. Keep answers short unless the question requires detail. \
      If the user asks about news, current events, or anything recent that you \
      may not know, use Google Search to find current information.";
+pub const DEFAULT_AGENT_MAX_STEPS: u32 = 24;
+pub const DEFAULT_AGENT_CONTEXT_BUDGET: i64 = 120_000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -38,12 +41,20 @@ pub struct Settings {
     pub input_device: String,
     pub auto_update: bool,
     pub llm_hotkey: String,
+    pub screenshot_hotkey: String,
     pub gemini_api_key: String,
     pub llm_model: String,
     pub tts_model: String,
     pub tts_voice: String,
     pub llm_system_prompt: String,
     pub session_limit: u64,
+    /// Prefer the deep-work budget/tool pack for every request.
+    pub agent_deep_work: bool,
+    pub agent_max_steps: u32,
+    pub agent_context_budget: i64,
+    /// Empty means `<app data>/workspace`.
+    pub workspace_root: String,
+    pub agent_log_everything: bool,
 }
 
 impl Default for Settings {
@@ -60,12 +71,18 @@ impl Default for Settings {
             input_device: String::new(),
             auto_update: DEFAULT_AUTO_UPDATE,
             llm_hotkey: DEFAULT_LLM_HOTKEY.to_string(),
+            screenshot_hotkey: DEFAULT_SCREENSHOT_HOTKEY.to_string(),
             gemini_api_key: String::new(),
             llm_model: DEFAULT_GEMINI_MODEL.to_string(),
             tts_model: DEFAULT_TTS_MODEL.to_string(),
             tts_voice: DEFAULT_TTS_VOICE.to_string(),
             llm_system_prompt: DEFAULT_LLM_SYSTEM_PROMPT.to_string(),
             session_limit: DEFAULT_SESSION_LIMIT,
+            agent_deep_work: false,
+            agent_max_steps: DEFAULT_AGENT_MAX_STEPS,
+            agent_context_budget: DEFAULT_AGENT_CONTEXT_BUDGET,
+            workspace_root: String::new(),
+            agent_log_everything: false,
         }
     }
 }

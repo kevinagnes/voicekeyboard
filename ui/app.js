@@ -269,6 +269,9 @@ async function loadSessionDetail(id) {
     row.appendChild(text);
     turns.appendChild(row);
   }
+  renderPlan($("sessionPlan"), session.plan);
+  renderArtifacts($("sessionArtifacts"), session.artifacts);
+  renderTools($("sessionTools"), session.toolRuns);
 }
 
 async function newSession() {
@@ -439,7 +442,12 @@ async function refreshModels() {
     const name = document.createElement("div");
     name.className = "model-name";
     name.textContent = m.name;
-    if (m.downloaded) {
+    if (m.cloud) {
+      const badge = document.createElement("span");
+      badge.className = "badge active";
+      badge.textContent = "cloud · Gemini";
+      name.appendChild(badge);
+    } else if (m.downloaded) {
       const badge = document.createElement("span");
       badge.className = "badge downloaded";
       badge.textContent = "downloaded";
@@ -461,7 +469,7 @@ async function refreshModels() {
     row.appendChild(radio);
     row.appendChild(body);
 
-    if (!m.downloaded) {
+    if (!m.downloaded && !m.cloud) {
       const btn = document.createElement("button");
       btn.className = "secondary";
       btn.textContent = "Download";
@@ -652,21 +660,304 @@ async function save() {
   state.settings.inputDevice = $("inputDevice").value;
   state.settings.autoUpdate = $("autoUpdate").checked;
   state.settings.llmHotkey = $("llmHotkey").value.trim();
+  state.settings.screenshotHotkey = $("screenshotHotkey").value.trim();
   state.settings.geminiApiKey = $("geminiKey").value.trim();
   state.settings.llmModel = $("llmModel").value;
   state.settings.ttsModel = $("ttsModel").value;
   state.settings.ttsVoice = $("ttsVoice").value;
   state.settings.llmSystemPrompt = $("llmPrompt").value;
   state.settings.sessionLimit = parseInt($("sessionLimit").value, 10) || 30;
+  state.settings.agentDeepWork = $("agentDeepWork").checked;
+  state.settings.agentMaxSteps = parseInt($("agentMaxSteps").value, 10) || 24;
+  state.settings.agentContextBudget = parseInt($("agentContextBudget").value, 10) || 120000;
+  state.settings.workspaceRoot = $("workspaceRoot").value.trim();
+  state.settings.agentLogEverything = $("agentLogEverything").checked;
 
   try {
     await invoke("update_settings", { settings: state.settings });
     $("saved").hidden = false;
+    $("savedAgent").hidden = false;
     await refreshStatus();
+    await refreshAgentTab();
   } catch (e) {
     alert(`Failed to save settings: ${e}`);
   }
 }
+
+function renderPlan(el, plan) {
+  if (!el) return;
+  el.innerHTML = "";
+  if (!plan || !plan.length) return;
+  const title = document.createElement("div");
+  title.className = "agent-subhead";
+  title.textContent = "Plan";
+  el.appendChild(title);
+  for (const item of plan) {
+    const row = document.createElement("div");
+    row.className = `plan-item ${item.status}`;
+    const mark = document.createElement("span");
+    mark.className = "plan-mark";
+    mark.textContent =
+      item.status === "completed"
+        ? "✓"
+        : item.status === "in_progress"
+          ? "▶"
+          : item.status === "blocked"
+            ? "!"
+            : "○";
+    const text = document.createElement("span");
+    text.textContent = item.title + (item.note ? ` — ${item.note}` : "");
+    row.appendChild(mark);
+    row.appendChild(text);
+    el.appendChild(row);
+  }
+}
+
+function renderArtifacts(el, artifacts) {
+  if (!el) return;
+  el.innerHTML = "";
+  if (!artifacts || !artifacts.length) return;
+  const title = document.createElement("div");
+  title.className = "agent-subhead";
+  title.textContent = "Artifacts";
+  el.appendChild(title);
+  for (const artifact of artifacts) {
+    const row = document.createElement("div");
+    row.className = "agent-artifact";
+    row.innerHTML = `<span class="artifact-path">${escapeHtml(artifact.path)}</span><span class="artifact-meta">${fmtBytes(artifact.bytes)} · ${escapeHtml(artifact.sha256.slice(0, 10))}</span>`;
+    el.appendChild(row);
+  }
+}
+
+function renderTools(el, tools) {
+  if (!el) return;
+  el.innerHTML = "";
+  if (!tools || !tools.length) return;
+  const title = document.createElement("div");
+  title.className = "agent-subhead";
+  title.textContent = "Tool timeline";
+  el.appendChild(title);
+  for (const tool of tools) {
+    const row = document.createElement("div");
+    row.className = `tool-row ${tool.status}`;
+    row.innerHTML = `<span class="tool-name">${escapeHtml(tool.name)}</span><span class="tool-status">${escapeHtml(tool.status)}</span>`;
+    el.appendChild(row);
+  }
+}
+
+async function refreshAgentPlan() {
+  let session = null;
+  try {
+    session = await invoke("get_active_session");
+  } catch {
+    session = null;
+  }
+  $("agentSessionLabel").textContent = session
+    ? `· ${session.title}`
+    : "· no active session";
+  renderPlan($("agentPlan"), session ? session.plan : []);
+  renderArtifacts($("agentArtifacts"), session ? session.artifacts : []);
+}
+
+async function refreshRuns() {
+  let runs = [];
+  try {
+    runs = await invoke("list_runs", { limit: 50 });
+  } catch {
+    runs = [];
+  }
+  const list = $("runList");
+  list.innerHTML = "";
+  if (!runs.length) {
+    list.innerHTML = '<div class="hint">No runs yet. Ask the assistant something.</div>';
+    $("runDetail").hidden = true;
+    return;
+  }
+  for (const run of runs) {
+    const row = document.createElement("div");
+    row.className = `run-row ${run.status}`;
+    const when = fmtWhen(run.startedAt);
+    row.innerHTML = `<span class="run-status">${escapeHtml(run.status)}</span><span class="run-when">${when}</span><span class="run-meta">${run.stepCount} steps · ${run.tokensIn + run.tokensOut} tok</span>`;
+    row.addEventListener("click", () => showRun(run.id));
+    list.appendChild(row);
+  }
+}
+
+async function showRun(id) {
+  let detail = null;
+  try {
+    detail = await invoke("get_run", { id });
+  } catch {
+    detail = null;
+  }
+  const el = $("runDetail");
+  if (!detail || !detail.run) {
+    el.hidden = true;
+    return;
+  }
+  const run = detail.run;
+  const steps = detail.steps || [];
+  const tools = detail.tools || [];
+  const events = detail.events || [];
+  el.hidden = false;
+  el.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "run-detail-head";
+  head.innerHTML = `<b>${escapeHtml(run.status)}</b> · ${escapeHtml(run.model || "")} · ${run.stepCount} steps · ${run.tokensIn} in / ${run.tokensOut} out · ${fmtWhen(run.startedAt)}`;
+  const undo = document.createElement("button");
+  undo.className = "secondary";
+  undo.textContent = "Undo file changes";
+  undo.addEventListener("click", async () => {
+    if (!window.confirm("Restore the files this run changed?")) return;
+    try {
+      const count = await invoke("undo_run", { runId: run.id });
+      addActivity(`Undo restored ${count} file(s)`, "ok");
+      await refreshRuns();
+    } catch (e) {
+      addActivity(`Undo failed: ${e}`, "err");
+    }
+  });
+  head.appendChild(undo);
+  el.appendChild(head);
+
+  const addSection = (title) => {
+    const sub = document.createElement("div");
+    sub.className = "agent-subhead";
+    sub.textContent = title;
+    el.appendChild(sub);
+  };
+  if (steps.length) {
+    addSection("Steps");
+    for (const step of steps) {
+      const row = document.createElement("div");
+      row.className = "run-step";
+      row.textContent = `#${step.step}.${step.attempt} ${step.finishReason || "—"} · ${step.inputTokens}+${step.outputTokens} tok · ${step.durationMs} ms${step.error ? ` · ${step.error}` : ""}`;
+      el.appendChild(row);
+    }
+  }
+  if (tools.length) {
+    addSection("Tools");
+    for (const tool of tools) {
+      const row = document.createElement("div");
+      row.className = `run-tool ${tool.status}`;
+      row.textContent = `${tool.name} · ${tool.status}${tool.outputPath ? " · spilled" : ""}`;
+      el.appendChild(row);
+    }
+  }
+  if (events.length) {
+    addSection("Events");
+    for (const event of events.slice(-40)) {
+      const row = document.createElement("div");
+      row.className = "run-event";
+      row.textContent = `${event.type} · ${JSON.stringify(event).slice(0, 220)}`;
+      el.appendChild(row);
+    }
+  }
+}
+
+async function refreshAgentPermissions() {
+  let items = [];
+  try {
+    items = await invoke("list_permissions");
+  } catch {
+    items = [];
+  }
+  const list = $("permissionList");
+  list.innerHTML = "";
+  if (!items.length) {
+    list.innerHTML = '<div class="hint">No saved grants. The assistant asks each time a write or side effect needs approval.</div>';
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "permission-row";
+    row.innerHTML = `<span class="permission-action">${escapeHtml(item.action)}</span><span class="permission-resource">${escapeHtml(item.resource)}</span><span class="permission-scope">${item.scope === "global" ? "global" : "session"}</span>`;
+    const revoke = document.createElement("button");
+    revoke.className = "secondary";
+    revoke.textContent = "Revoke";
+    revoke.addEventListener("click", async () => {
+      await invoke("revoke_permission", { id: item.id });
+      await refreshAgentPermissions();
+    });
+    row.appendChild(revoke);
+    list.appendChild(row);
+  }
+}
+
+async function refreshJobs() {
+  let jobs = [];
+  try {
+    jobs = await invoke("list_jobs", { limit: 50 });
+  } catch {
+    jobs = [];
+  }
+  const list = $("jobList");
+  list.innerHTML = "";
+  if (!jobs.length) {
+    list.innerHTML = '<div class="hint">No background jobs. Start one above; it survives an app restart.</div>';
+    return;
+  }
+  for (const job of jobs) {
+    const row = document.createElement("div");
+    row.className = `job-row ${job.status}`;
+    row.innerHTML = `<span class="job-status">${escapeHtml(job.status)}</span><span class="job-kind">${escapeHtml(job.kind)}</span><span class="job-meta">${Math.round((job.progress || 0) * 100)}% · ${fmtWhen(job.createdAt)}</span>`;
+    if (job.status === "queued" || job.status === "waiting" || job.status === "running") {
+      const cancel = document.createElement("button");
+      cancel.className = "secondary";
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", async () => {
+        await invoke("cancel_job", { id: job.id });
+        await refreshJobs();
+      });
+      row.appendChild(cancel);
+    }
+    list.appendChild(row);
+  }
+}
+
+async function refreshAgentStats() {
+  let m = null;
+  try {
+    m = await invoke("agent_metrics");
+  } catch {
+    m = null;
+  }
+  const el = $("agentStats");
+  el.innerHTML = "";
+  if (!m) return;
+  const rows = [
+    ["Runs", m.runs],
+    ["Steps", m.steps],
+    ["Compactions", m.compactions],
+    ["Retries", m.retries],
+    ["Tool calls", m.tools],
+    ["Tool failures", m.toolFailures],
+    ["Input tokens", m.inputTokens],
+    ["Output tokens", m.outputTokens],
+    ["Avg first text", `${Math.round(m.avgFirstTextMs || 0)} ms`],
+  ];
+  for (const [label, value] of rows) {
+    const stat = document.createElement("div");
+    stat.className = "stat";
+    stat.innerHTML = `<span class="stat-label">${label}:</span> <span>${value ?? "—"}</span>`;
+    el.appendChild(stat);
+  }
+}
+
+async function refreshAgentTab() {
+  try {
+    const path = await invoke("workspace_path");
+    $("workspacePath").textContent = path;
+  } catch {
+    $("workspacePath").textContent = "";
+  }
+  await refreshAgentPlan();
+  await refreshRuns();
+  await refreshAgentPermissions();
+  await refreshJobs();
+  await refreshAgentStats();
+}
+
 
 async function init() {
   state.settings = await invoke("get_settings");
@@ -679,9 +970,15 @@ async function init() {
   $("inputDevice").value = state.settings.inputDevice || "";
   $("autoUpdate").checked = state.settings.autoUpdate !== false;
   $("llmHotkey").value = state.settings.llmHotkey || "";
+  $("screenshotHotkey").value = state.settings.screenshotHotkey || "";
   $("geminiKey").value = state.settings.geminiApiKey || "";
   $("llmPrompt").value = state.settings.llmSystemPrompt || "";
   $("sessionLimit").value = state.settings.sessionLimit || 30;
+  $("agentDeepWork").checked = !!state.settings.agentDeepWork;
+  $("agentMaxSteps").value = state.settings.agentMaxSteps || 24;
+  $("agentContextBudget").value = state.settings.agentContextBudget || 120000;
+  $("workspaceRoot").value = state.settings.workspaceRoot || "";
+  $("agentLogEverything").checked = !!state.settings.agentLogEverything;
   fillSingleOption($("llmModel"), state.settings.llmModel);
   fillSingleOption($("ttsModel"), state.settings.ttsModel);
   fillSingleOption($("ttsVoice"), state.settings.ttsVoice);
@@ -693,6 +990,9 @@ async function init() {
   );
   $("captureLlmHotkey").addEventListener("click", () =>
     startHotkeyCapture("llmHotkey", "captureLlmHotkey", "llmHotkey"),
+  );
+  $("captureShotHotkey").addEventListener("click", () =>
+    startHotkeyCapture("screenshotHotkey", "captureShotHotkey", "screenshotHotkey"),
   );
   $("hotkey").addEventListener("change", (e) => {
     state.settings.hotkey = e.target.value.trim();
@@ -718,6 +1018,23 @@ async function init() {
   });
   $("sessionLimit").addEventListener("change", markDirty);
   $("save").addEventListener("click", save);
+  $("saveAgent").addEventListener("click", save);
+  $("refreshRuns").addEventListener("click", refreshRuns);
+  $("refreshJobs").addEventListener("click", refreshJobs);
+  $("enqueueJob").addEventListener("click", async () => {
+    const prompt = $("jobPrompt").value.trim();
+    if (!prompt) return;
+    try {
+      await invoke("enqueue_agent_job", { prompt, deep: true });
+      $("jobPrompt").value = "";
+      await refreshJobs();
+    } catch (e) {
+      addActivity(`Could not start job: ${e}`, "err");
+    }
+  });
+  ["agentDeepWork", "agentMaxSteps", "agentContextBudget", "workspaceRoot", "agentLogEverything"].forEach(
+    (id) => $(id).addEventListener("change", markDirty),
+  );
 
   $("newSession").addEventListener("click", newSession);
   $("sessionUse").addEventListener("click", async () => {
@@ -746,7 +1063,10 @@ async function init() {
   $("sessionDelete").addEventListener("click", deleteSelectedSession);
 
   document.querySelectorAll(".tab").forEach((b) => {
-    b.addEventListener("click", () => switchTab(b.dataset.tab));
+    b.addEventListener("click", () => {
+      switchTab(b.dataset.tab);
+      if (b.dataset.tab === "agent") refreshAgentTab();
+    });
   });
 
   const micButton = $("requestMicrophone");
@@ -897,7 +1217,13 @@ async function init() {
       addActivity("Ask Gemini — speak your question", "rec");
     }
   });
-  listen("llm-session", refreshSessions);
+  listen("llm-session", () => {
+    refreshSessions();
+    refreshAgentPlan();
+  });
+  listen("agent-runs", () => {
+    if (!$("tab-agent").hidden) refreshRuns();
+  });
   listen("open-sessions", () => switchTab("sessions"));
   listen("paste-failed", (e) => {
     refreshStatus();

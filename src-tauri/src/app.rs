@@ -1,17 +1,19 @@
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, Manager, Position, State, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, PhysicalSize, Position, State,
+    WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as _;
 
-use crate::core::{capture, gemini, hotkey, mic, paste, sessions, settings, sounds, stt};
+use crate::core::agent::{desktop::SystemDesktop, AgentService};
+use crate::core::{capture, gemini, hotkey, mic, paste, settings, sounds, stt};
 use crate::downloader::{is_valid_model_file, Downloader};
 use crate::model_registry::ModelRegistry;
 use crate::updater::{self, UpdateInfo};
@@ -38,15 +40,53 @@ const TRAY_ID: &str = "main";
 const OVERLAY_ID: &str = "recording-overlay";
 const GATE_ID: &str = "permissions-gate";
 const LLM_OVERLAY_ID: &str = "llm-overlay";
+const SHOT_ID: &str = "screenshot-overlay";
 const OVERLAY_W: f64 = 380.0;
 const OVERLAY_H: f64 = 64.0;
 const OVERLAY_BOTTOM_MARGIN: f64 = 72.0;
 const LLM_OVERLAY_W: f64 = 560.0;
 const LLM_OVERLAY_H: f64 = 250.0;
-/// Taller panel when the active session already has conversation history.
-const LLM_OVERLAY_H_HISTORY: f64 = 430.0;
+/// Taller panel when the user expands the session history.
+const LLM_OVERLAY_H_EXPANDED: f64 = 620.0;
 /// How many sessions the tray submenu lists; the rest live in Settings.
 const SESSIONS_IN_MENU: usize = 12;
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct StoredPosition {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct OverlayPositions {
+    recording: Option<StoredPosition>,
+    llm: Option<StoredPosition>,
+}
+
+fn overlay_positions_path() -> PathBuf {
+    crate::app_data_dir().join("overlay_positions.json")
+}
+
+fn load_overlay_positions() -> OverlayPositions {
+    std::fs::read_to_string(overlay_positions_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_overlay_positions(positions: &OverlayPositions) {
+    let path = overlay_positions_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(raw) = serde_json::to_string_pretty(positions) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, raw).is_ok() {
+            let _ = std::fs::rename(tmp, path);
+        }
+    }
+}
 
 /// Which action a hotkey press belongs to. Recording and capture are shared;
 /// the outcome differs only on release.
@@ -54,6 +94,7 @@ const SESSIONS_IN_MENU: usize = 12;
 enum Mode {
     Record,
     AskLlm,
+    Screenshot,
 }
 
 enum Job {
@@ -62,14 +103,27 @@ enum Job {
     /// `session_id` is the session captured when the recording began; `None`
     /// means the question starts a fresh session.
     AskLlm(Vec<f32>, Option<String>, String, Option<String>),
+    /// Live transcription already produced the final text.
+    RecordedText(String),
+    AskText(String, Option<String>),
+    /// Screenshot + spoken question, after batch transcription.
+    AskScreenshot(
+        Vec<f32>,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+    ),
+    /// Screenshot + spoken question, when streaming already produced the text.
+    AskScreenshotText(String, Option<String>, Option<String>),
 }
 
 pub struct AppState {
     pub settings: Mutex<settings::Settings>,
     pub hotkeys: Mutex<Option<hotkey::HotkeyController>>,
     pub recorder: Mutex<Option<capture::AudioRecorder>>,
-    pub stt: stt::SttEngine,
-    pub sounds: sounds::Sounds,
+    pub stt: Arc<stt::SttEngine>,
+    pub sounds: Arc<sounds::Sounds>,
     pub registry: ModelRegistry,
     job_tx: Mutex<Option<mpsc::Sender<Job>>>,
     downloading: Mutex<Option<String>>,
@@ -82,6 +136,7 @@ pub struct AppState {
     pub model_loaded: AtomicBool,
     pub hotkey_ok: AtomicBool,
     pub hotkey_llm_ok: AtomicBool,
+    pub hotkey_shot_ok: AtomicBool,
     /// True while the current (or last) hotkey gesture is in Ask-LLM mode.
     pub llm_mode: AtomicBool,
     /// Set by the Cancel button / Esc; the Ask-LLM pipeline checks it between
@@ -93,7 +148,7 @@ pub struct AppState {
     /// Cancel button / Esc can stop it.
     pub speech: Mutex<Option<sounds::SpeechStreamHandle>>,
     /// Recallable AI assistant conversations.
-    pub sessions: Mutex<sessions::SessionStore>,
+    pub agent: Arc<AgentService>,
     pub update: Mutex<Option<UpdateInfo>>,
     pub update_checking: AtomicBool,
     pub update_installing: AtomicBool,
@@ -101,6 +156,18 @@ pub struct AppState {
     /// True while required permissions (mic + accessibility) are missing and
     /// the app is blocked behind the permissions-gate window.
     pub gated: AtomicBool,
+    /// User-moved positions for the floating panels (physical pixels).
+    pub overlay_positions: Mutex<OverlayPositions>,
+    /// Active Gemini Live transcription session while the hotkey is held.
+    pub live_stt: Mutex<Option<crate::core::live_stt::LiveSttSession>>,
+    /// Incremental local transcription (Whisper/Nemotron) while the hotkey is held.
+    pub local_stream: Mutex<Option<crate::core::local_stream::LocalStream>>,
+    /// True while the screenshot selection overlay is open.
+    pub screenshot_selecting: AtomicBool,
+    /// True while the screenshot hotkey is still held.
+    pub screenshot_hold: AtomicBool,
+    /// Screenshot captured for the current question.
+    pub pending_screenshot: Mutex<Option<String>>,
 }
 
 const MAX_RECENT: usize = 3;
@@ -115,12 +182,19 @@ impl AppState {
             &settings.tts_model,
             &settings.tts_voice,
         );
+        let sounds = Arc::new(sounds::Sounds::new());
+        let desktop = Arc::new(SystemDesktop::new());
+        let agent = AgentService::start(
+            crate::app_data_dir().join("agent.db"),
+            sounds.clone(),
+            desktop,
+        );
         Self {
             settings: Mutex::new(settings),
             hotkeys: Mutex::new(None),
             recorder: Mutex::new(None),
-            stt: stt::SttEngine::new(),
-            sounds: sounds::Sounds::new(),
+            stt: Arc::new(stt::SttEngine::new()),
+            sounds,
             registry: ModelRegistry::from_embedded(),
             job_tx: Mutex::new(None),
             downloading: Mutex::new(None),
@@ -133,16 +207,23 @@ impl AppState {
             model_loaded: AtomicBool::new(false),
             hotkey_ok: AtomicBool::new(true),
             hotkey_llm_ok: AtomicBool::new(true),
+            hotkey_shot_ok: AtomicBool::new(true),
             llm_mode: AtomicBool::new(false),
             cancel_pending: AtomicBool::new(false),
             gemini: Mutex::new(Some(gemini_client)),
             speech: Mutex::new(None),
-            sessions: Mutex::new(sessions::load()),
+            agent,
             update: Mutex::new(None),
             update_checking: AtomicBool::new(false),
             update_installing: AtomicBool::new(false),
             update_progress: Mutex::new(None),
             gated: AtomicBool::new(false),
+            overlay_positions: Mutex::new(load_overlay_positions()),
+            live_stt: Mutex::new(None),
+            local_stream: Mutex::new(None),
+            screenshot_selecting: AtomicBool::new(false),
+            screenshot_hold: AtomicBool::new(false),
+            pending_screenshot: Mutex::new(None),
         }
     }
 }
@@ -184,54 +265,6 @@ pub struct SessionMetaDto {
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionDto {
-    pub id: String,
-    pub title: String,
-    pub created_at: u64,
-    pub updated_at: u64,
-    pub active: bool,
-    pub turns: Vec<TurnDto>,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnDto {
-    pub role: String,
-    pub text: String,
-    pub at: u64,
-}
-
-fn session_meta(session: &sessions::Session, active: bool) -> SessionMetaDto {
-    SessionMetaDto {
-        id: session.id.clone(),
-        title: session.display_title(),
-        updated_at: session.updated_at,
-        turns: session.turns.len(),
-        active,
-    }
-}
-
-fn session_dto(session: &sessions::Session, active: bool) -> SessionDto {
-    SessionDto {
-        id: session.id.clone(),
-        title: session.display_title(),
-        created_at: session.created_at,
-        updated_at: session.updated_at,
-        active,
-        turns: session
-            .turns
-            .iter()
-            .map(|t| TurnDto {
-                role: t.role.clone(),
-                text: t.text.clone(),
-                at: t.at,
-            })
-            .collect(),
-    }
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct ModelStatusDto {
     pub id: String,
     pub name: String,
@@ -242,6 +275,8 @@ pub struct ModelStatusDto {
     pub downloaded: bool,
     pub path: Option<String>,
     pub active: bool,
+    pub engine: String,
+    pub cloud: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -344,6 +379,26 @@ pub fn run() {
             set_active_session,
             rename_session,
             delete_session,
+            save_overlay_position,
+            set_llm_overlay_expanded,
+            screenshot_region_selected,
+            cancel_screenshot,
+            crate::agent_commands::respond_permission,
+            crate::agent_commands::pending_permission,
+            crate::agent_commands::list_runs,
+            crate::agent_commands::get_run,
+            crate::agent_commands::get_plan,
+            crate::agent_commands::clear_plan,
+            crate::agent_commands::list_artifacts,
+            crate::agent_commands::list_permissions,
+            crate::agent_commands::revoke_permission,
+            crate::agent_commands::list_jobs,
+            crate::agent_commands::cancel_job,
+            crate::agent_commands::enqueue_agent_job,
+            crate::agent_commands::undo_run,
+            crate::agent_commands::agent_metrics,
+            crate::agent_commands::agent_status,
+            crate::agent_commands::workspace_path,
         ])
         .setup(move |app| {
             let state = &setup_state;
@@ -357,6 +412,8 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let handle = app.handle().clone();
+            state.agent.attach(handle.clone());
+            state.agent.recover();
 
             let menu = build_menu(&handle, state)?;
             TrayIconBuilder::with_id(TRAY_ID)
@@ -463,6 +520,30 @@ pub fn run() {
                         &format!(
                             "Ask-LLM hotkey \"{}\" could not be registered: {e}",
                             hotkey::display(&llm_hotkey_spec)
+                        ),
+                    );
+                }
+            }
+            let screenshot_hotkey_spec = state.settings.lock().screenshot_hotkey.clone();
+            match controller.rebind_screenshot(&screenshot_hotkey_spec) {
+                Ok(()) => {
+                    state.hotkey_shot_ok.store(true, Ordering::SeqCst);
+                    debug_log(&format!(
+                        "screenshot hotkey registered: {}",
+                        hotkey::display(&screenshot_hotkey_spec)
+                    ));
+                }
+                Err(e) => {
+                    state.hotkey_shot_ok.store(false, Ordering::SeqCst);
+                    debug_log(&format!(
+                        "screenshot hotkey FAILED to register {}: {e}",
+                        screenshot_hotkey_spec
+                    ));
+                    emit_error(
+                        &handle,
+                        &format!(
+                            "Screenshot hotkey \"{}\" could not be registered: {e}",
+                            hotkey::display(&screenshot_hotkey_spec)
                         ),
                     );
                 }
@@ -669,6 +750,9 @@ fn spawn_hotkey_thread(app: AppHandle, state: Arc<AppState>) {
                         Some(controller) if Some(event.id()) == controller.llm_id() => {
                             Some(Mode::AskLlm)
                         }
+                        Some(controller) if Some(event.id()) == controller.screenshot_id() => {
+                            Some(Mode::Screenshot)
+                        }
                         _ => None,
                     }
                 };
@@ -791,6 +875,130 @@ fn spawn_stt_worker(app: AppHandle, state: Arc<AppState>, rx: mpsc::Receiver<Job
                         state.busy.store(false, Ordering::SeqCst);
                         update_tray(&app, &state);
                     }
+                    Job::RecordedText(text) => {
+                        let language = state.settings.lock().language.clone();
+                        deliver_recorded_text(&app, &state, &text, &language, 0, 0);
+                        state.busy.store(false, Ordering::SeqCst);
+                        update_tray(&app, &state);
+                    }
+                    Job::AskText(text, session_id) => {
+                        if text.trim().is_empty() {
+                            state.sounds.play(sounds::Chime::Error);
+                            emit_llm_status(
+                                &app,
+                                "error",
+                                "",
+                                "",
+                                Some("Nothing was heard — try again".into()),
+                                Vec::new(),
+                            );
+                            hide_llm_overlay_delayed(&app, std::time::Duration::from_millis(1200));
+                        } else {
+                            {
+                                let mut recent = state.recent.lock();
+                                recent.insert(0, text.clone());
+                                recent.truncate(MAX_RECENT);
+                            }
+                            let id = state.agent.admit_user_text(
+                                session_id.as_deref(),
+                                &text,
+                                None,
+                                "steer",
+                                false,
+                            );
+                            debug_log(&format!("ask-llm: admitted live text to session {id}"));
+                            let _ = app.emit(EVT_LLM_SESSION, ());
+                        }
+                        state.llm_mode.store(false, Ordering::SeqCst);
+                        state.busy.store(false, Ordering::SeqCst);
+                        update_tray(&app, &state);
+                    }
+                    Job::AskScreenshot(samples, language, prompt, session_id, image) => {
+                        let result = state.stt.transcribe(&samples, language.as_deref(), &prompt);
+                        match result {
+                            Ok(transcription) if !transcription.text.trim().is_empty() => {
+                                let text = transcription.text.trim().to_string();
+                                {
+                                    let mut recent = state.recent.lock();
+                                    recent.insert(0, text.clone());
+                                    recent.truncate(MAX_RECENT);
+                                }
+                                let id = state.agent.admit_user_image(
+                                    session_id.as_deref(),
+                                    &text,
+                                    image.as_deref(),
+                                    "steer",
+                                    false,
+                                );
+                                debug_log(&format!("screenshot: admitted to session {id}"));
+                                let _ = app.emit(EVT_LLM_SESSION, ());
+                            }
+                            Ok(_) => {
+                                state.sounds.play(sounds::Chime::Error);
+                                emit_llm_status(
+                                    &app,
+                                    "error",
+                                    "",
+                                    "",
+                                    Some("Nothing was heard — try again".into()),
+                                    Vec::new(),
+                                );
+                                hide_llm_overlay_delayed(
+                                    &app,
+                                    std::time::Duration::from_millis(1200),
+                                );
+                            }
+                            Err(e) => {
+                                emit_llm_status(
+                                    &app,
+                                    "error",
+                                    "",
+                                    "",
+                                    Some(e.to_string()),
+                                    Vec::new(),
+                                );
+                                hide_llm_overlay_delayed(
+                                    &app,
+                                    std::time::Duration::from_millis(1800),
+                                );
+                            }
+                        }
+                        state.llm_mode.store(false, Ordering::SeqCst);
+                        state.busy.store(false, Ordering::SeqCst);
+                        update_tray(&app, &state);
+                    }
+                    Job::AskScreenshotText(text, session_id, image) => {
+                        if text.trim().is_empty() {
+                            state.sounds.play(sounds::Chime::Error);
+                            emit_llm_status(
+                                &app,
+                                "error",
+                                "",
+                                "",
+                                Some("Nothing was heard — try again".into()),
+                                Vec::new(),
+                            );
+                            hide_llm_overlay_delayed(&app, std::time::Duration::from_millis(1200));
+                        } else {
+                            {
+                                let mut recent = state.recent.lock();
+                                recent.insert(0, text.clone());
+                                recent.truncate(MAX_RECENT);
+                            }
+                            let id = state.agent.admit_user_image(
+                                session_id.as_deref(),
+                                &text,
+                                image.as_deref(),
+                                "steer",
+                                false,
+                            );
+                            debug_log(&format!("screenshot: admitted live text to session {id}"));
+                            let _ = app.emit(EVT_LLM_SESSION, ());
+                        }
+                        state.llm_mode.store(false, Ordering::SeqCst);
+                        state.busy.store(false, Ordering::SeqCst);
+                        update_tray(&app, &state);
+                    }
                 }
             }
         })
@@ -830,7 +1038,7 @@ fn on_pressed(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
         debug_log("pressed: ignored — permissions not granted");
         return;
     }
-    if state.busy.load(Ordering::SeqCst) || state.recording.load(Ordering::SeqCst) {
+    if state.screenshot_selecting.load(Ordering::SeqCst) && mode != Mode::Screenshot {
         return;
     }
     if app
@@ -839,9 +1047,51 @@ fn on_pressed(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
     {
         return;
     }
+    if mode == Mode::Screenshot {
+        if state.recording.load(Ordering::SeqCst)
+            || state.screenshot_selecting.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        if state.agent.is_voice_active() || state.agent.is_speaking() {
+            state.agent.notify_barge_in();
+        }
+        state.screenshot_hold.store(true, Ordering::SeqCst);
+        show_screenshot_overlay(app, state);
+        return;
+    }
+    if state.busy.load(Ordering::SeqCst) || state.recording.load(Ordering::SeqCst) {
+        if mode == Mode::Record
+            || state.recording.load(Ordering::SeqCst)
+            || !(state.agent.is_voice_active() || state.agent.is_speaking())
+        {
+            return;
+        }
+    }
+    if mode == Mode::Record && (state.agent.is_voice_active() || state.agent.is_speaking()) {
+        // Do not capture the assistant's own speech with dictation.
+        return;
+    }
+    if mode == Mode::AskLlm && (state.agent.is_voice_active() || state.agent.is_speaking()) {
+        // Barge-in: stop the current reply and admit the new utterance as a
+        // steer at the next safe boundary.
+        debug_log("pressed(AskLlm): barge-in");
+        state.agent.notify_barge_in();
+        if let Some(recorder) = state.recorder.lock().as_ref() {
+            let _ = recorder.stop();
+        }
+    }
+    begin_capture(app, state, mode);
+}
+
+fn begin_capture(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
+    if state.recording.load(Ordering::SeqCst) {
+        return;
+    }
+    let assistant = mode != Mode::Record;
     state.recording.store(true, Ordering::SeqCst);
-    state.llm_mode.store(mode == Mode::AskLlm, Ordering::SeqCst);
-    if mode == Mode::AskLlm {
+    state.llm_mode.store(assistant, Ordering::SeqCst);
+    if assistant {
         state.cancel_pending.store(false, Ordering::SeqCst);
     }
     debug_log(&format!(
@@ -861,28 +1111,108 @@ fn on_pressed(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
             recorder.start();
         }
     }
+    // Gemini Transcribe uses the Live API; local engines use incremental
+    // segment transcription. Both stream while the hotkey is held.
+    {
+        let (engine_kind, api_key, language, model_id, prompt) = {
+            let s = state.settings.lock();
+            let engine = state
+                .registry
+                .find(&s.model_id)
+                .map(|m| m.engine.clone())
+                .unwrap_or_else(|| "whisper".to_string());
+            (
+                engine,
+                s.gemini_api_key.clone(),
+                if s.language.is_empty() || s.language == "auto" {
+                    None
+                } else {
+                    Some(s.language.clone())
+                },
+                s.model_id.clone(),
+                s.initial_prompt.clone(),
+            )
+        };
+        if engine_kind == "gemini" && !api_key.is_empty() {
+            let live = crate::core::live_stt::LiveSttSession::start(
+                &api_key,
+                &model_id,
+                language.as_deref(),
+                assistant.then(|| app.clone()),
+            );
+            let sender = live.audio_sender();
+            *state.live_stt.lock() = Some(live);
+            if let Some(recorder) = state.recorder.lock().as_ref() {
+                recorder.set_chunk_sink(Some(sender));
+            }
+            debug_log("live-stt: session started");
+        } else if engine_kind != "gemini" {
+            let stream = crate::core::local_stream::LocalStream::start(
+                state.stt.clone(),
+                language,
+                prompt,
+                assistant.then(|| app.clone()),
+            );
+            let sender = stream.audio_sender();
+            *state.local_stream.lock() = Some(stream);
+            if let Some(recorder) = state.recorder.lock().as_ref() {
+                recorder.set_chunk_sink(Some(sender));
+            }
+            debug_log("local-stream: session started");
+        }
+    }
     state.sounds.play(sounds::Chime::RecordStart);
     let _ = app.emit(EVT_RECORDING_STARTED, ());
-    if mode == Mode::AskLlm {
+    if assistant {
         show_llm_overlay(app, state);
         emit_llm_status(app, "listening", "", "", None, Vec::new());
+        if mode == Mode::Screenshot {
+            let _ = app.emit("screenshot-attached", ());
+        }
     } else {
         show_overlay(app, state);
+    }
+    if mode == Mode::Screenshot && !state.screenshot_hold.load(Ordering::SeqCst) {
+        // The hotkey was released between the selection and recording start.
+        state.recording.store(false, Ordering::SeqCst);
+        if let Some(recorder) = state.recorder.lock().as_ref() {
+            let _ = recorder.stop();
+        }
+        if let Some(session) = state.live_stt.lock().take() {
+            session.cancel();
+        }
+        if let Some(session) = state.local_stream.lock().take() {
+            session.cancel();
+        }
+        hide_llm_overlay_delayed(app, std::time::Duration::from_millis(200));
+        return;
     }
     update_tray(app, state);
 }
 
 fn on_released(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
+    if mode == Mode::Screenshot {
+        state.screenshot_hold.store(false, Ordering::SeqCst);
+    }
     if !state.recording.load(Ordering::SeqCst) {
+        if mode == Mode::Screenshot {
+            cancel_screenshot_overlay(app, state);
+        }
         return;
     }
     state.recording.store(false, Ordering::SeqCst);
+    let assistant = mode != Mode::Record;
     let samples = state
         .recorder
         .lock()
         .as_ref()
         .map(|r| r.stop())
         .unwrap_or_default();
+    let mut live = state.live_stt.lock().take();
+    let mut local = state.local_stream.lock().take();
+    if let Some(recorder) = state.recorder.lock().as_ref() {
+        recorder.set_chunk_sink(None);
+    }
     let peak = samples.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
     let _ = app.emit(EVT_RECORDING_STOPPED, ());
     update_tray(app, state);
@@ -900,7 +1230,7 @@ fn on_released(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
         let id = state.settings.lock().model_id.clone();
         debug_log("discard: model not loaded");
         let _ = app.emit(EVT_MODEL_MISSING, &id);
-        if mode == Mode::AskLlm {
+        if assistant {
             emit_llm_status(
                 app,
                 "error",
@@ -914,10 +1244,16 @@ fn on_released(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
             hide_overlay_delayed(app, std::time::Duration::from_millis(900));
         }
         update_tray(app, state);
+        if let Some(session) = live.take() {
+            session.cancel();
+        }
+        if let Some(session) = local.take() {
+            session.cancel();
+        }
         return;
     }
 
-    if mode == Mode::AskLlm {
+    if assistant {
         let configured = state.gemini.lock().as_ref().is_some_and(|g| g.configured());
         if !configured {
             debug_log("ask-llm: no Gemini key configured");
@@ -932,6 +1268,12 @@ fn on_released(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
             );
             hide_llm_overlay_delayed(app, std::time::Duration::from_millis(2200));
             update_tray(app, state);
+            if let Some(session) = live.take() {
+                session.cancel();
+            }
+            if let Some(session) = local.take() {
+                session.cancel();
+            }
             return;
         }
     }
@@ -952,7 +1294,7 @@ fn on_released(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
             "discard: too-short trimmed_ms={ms} min_ms={min_ms} peak={peak:.4}"
         ));
         state.sounds.play(sounds::Chime::Error);
-        if mode == Mode::AskLlm {
+        if assistant {
             emit_llm_status(
                 app,
                 "error",
@@ -967,6 +1309,12 @@ fn on_released(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
         } else {
             hide_overlay_delayed(app, std::time::Duration::from_millis(900));
         }
+        if let Some(session) = live.take() {
+            session.cancel();
+        }
+        if let Some(session) = local.take() {
+            session.cancel();
+        }
         return;
     }
     debug_log(&format!(
@@ -974,6 +1322,62 @@ fn on_released(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
         trimmed.len(),
         trimmed.len() * 1000 / capture::SAMPLE_RATE as usize
     ));
+
+    if let Some(session) = live.take() {
+        state.busy.store(true, Ordering::SeqCst);
+        update_tray(app, state);
+        let partial = session.partial();
+        if assistant {
+            emit_llm_status(app, "transcribing", &partial, "", None, Vec::new());
+        }
+        match session.finish() {
+            Ok(text) if !text.trim().is_empty() => {
+                let transcript = text.trim().to_string();
+                debug_log(&format!(
+                    "live-stt: final {} chars for {mode:?}",
+                    transcript.chars().count()
+                ));
+                submit_streamed_transcript(app, state, mode, transcript);
+                return;
+            }
+            Ok(_) => {
+                debug_log("live-stt: empty final; falling back to batch STT");
+            }
+            Err(e) => {
+                debug_log(&format!(
+                    "live-stt: failed ({e}); falling back to batch STT"
+                ));
+            }
+        }
+    }
+
+    if let Some(stream) = local.take() {
+        state.busy.store(true, Ordering::SeqCst);
+        update_tray(app, state);
+        let partial = stream.partial();
+        if assistant {
+            emit_llm_status(app, "transcribing", &partial, "", None, Vec::new());
+        }
+        match stream.finish() {
+            Ok(text) if !text.trim().is_empty() => {
+                let transcript = text.trim().to_string();
+                debug_log(&format!(
+                    "local-stream: final {} chars for {mode:?}",
+                    transcript.chars().count()
+                ));
+                submit_streamed_transcript(app, state, mode, transcript);
+                return;
+            }
+            Ok(_) => {
+                debug_log("local-stream: empty final; falling back to batch STT");
+            }
+            Err(e) => {
+                debug_log(&format!(
+                    "local-stream: failed ({e}); falling back to batch STT"
+                ));
+            }
+        }
+    }
 
     state.busy.store(true, Ordering::SeqCst);
     update_tray(app, state);
@@ -987,15 +1391,23 @@ fn on_released(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
         .unwrap_or_else(|| "whisper".to_string());
     let language = match language.as_str() {
         "auto" | "" => None,
-        code if engine_kind == "nemotron" => Some(code.to_string()),
+        code if engine_kind == "nemotron" || engine_kind == "gemini" => Some(code.to_string()),
         "en" | "pt" => Some(language),
         _ => None,
     };
     if let Some(tx) = state.job_tx.lock().as_ref() {
-        let job = if mode == Mode::AskLlm {
+        let session_id = state.agent.active_session_id();
+        let job = if mode == Mode::Screenshot {
+            Job::AskScreenshot(
+                trimmed,
+                language,
+                prompt,
+                session_id,
+                state.pending_screenshot.lock().take(),
+            )
+        } else if assistant {
             // Snapshot the session now: the user may have clicked "New session"
             // while recording, and that choice must apply to this utterance.
-            let session_id = state.sessions.lock().active_id.clone();
             Job::AskLlm(trimmed, language, prompt, session_id)
         } else {
             Job::Transcribe(trimmed, language, prompt)
@@ -1007,9 +1419,88 @@ fn on_released(app: &AppHandle, state: &Arc<AppState>, mode: Mode) {
     }
 }
 
-/// Full Ask-LLM pipeline (runs on the STT worker thread): transcribe the
-/// recording, send it to Gemini, then stream the spoken reply through the
-/// speakers while the text is shown in the LLM overlay panel.
+fn submit_streamed_transcript(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    mode: Mode,
+    transcript: String,
+) {
+    let session_id = state.agent.active_session_id();
+    if mode != Mode::Record && state.cancel_pending.swap(false, Ordering::SeqCst) {
+        emit_llm_status(app, "cancelled", &transcript, "", None, Vec::new());
+        hide_llm_overlay_delayed(app, std::time::Duration::from_millis(500));
+        state.busy.store(false, Ordering::SeqCst);
+        return;
+    }
+    if let Some(tx) = state.job_tx.lock().as_ref() {
+        let job = match mode {
+            Mode::Screenshot => Job::AskScreenshotText(
+                transcript,
+                session_id,
+                state.pending_screenshot.lock().take(),
+            ),
+            Mode::AskLlm => Job::AskText(transcript, session_id),
+            Mode::Record => Job::RecordedText(transcript),
+        };
+        let _ = tx.send(job);
+    } else {
+        state.busy.store(false, Ordering::SeqCst);
+        emit_error(app, "internal error: worker not ready");
+    }
+}
+
+fn deliver_recorded_text(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    text: &str,
+    language: &str,
+    inference_ms: u64,
+    n_segments: i32,
+) {
+    if text.trim().is_empty() {
+        debug_log("stt: empty transcript");
+        state.sounds.play(sounds::Chime::Error);
+        hide_overlay_delayed(app, std::time::Duration::from_millis(900));
+        return;
+    }
+    debug_log(&format!("stt: text='{}' lang={}", text.trim(), language));
+    {
+        let mut recent = state.recent.lock();
+        recent.insert(0, text.to_string());
+        recent.truncate(MAX_RECENT);
+    }
+    match paste_text_on_main(app, text) {
+        Ok(outcome) if outcome.pasted => {
+            state.sounds.play(sounds::Chime::PasteDone);
+            let _ = app.emit(
+                EVT_TRANSCRIPT,
+                TranscriptDto {
+                    text: text.to_string(),
+                    language: language.to_string(),
+                    inference_ms,
+                    n_segments,
+                },
+            );
+            hide_overlay_delayed(app, std::time::Duration::from_millis(150));
+        }
+        Ok(outcome) if outcome.skipped_secure => {
+            debug_log("paste: skipped (secure field)");
+            let _ = app.emit(EVT_SECURE_SKIPPED, ());
+            hide_overlay_delayed(app, std::time::Duration::from_millis(900));
+        }
+        Ok(_) => {
+            debug_log("paste: no-op (empty)");
+            hide_overlay_delayed(app, std::time::Duration::from_millis(900));
+        }
+        Err(e) => {
+            handle_paste_failure(app, state, text, &e);
+        }
+    }
+}
+
+/// Ask-LLM pipeline (runs on the STT worker thread): transcribe the recording
+/// and admit it to the durable agent inbox. The agent worker performs the
+/// model calls, tools, permissions, streaming speech and recovery.
 fn run_ask_llm(
     app: &AppHandle,
     state: &Arc<AppState>,
@@ -1056,185 +1547,12 @@ fn run_ask_llm(
         recent.truncate(MAX_RECENT);
     }
     debug_log(&format!("ask-llm: transcript '{}'", transcript));
-
-    // Record the question in its session (creating one when the user asked for
-    // a clean context) and replay the session to Gemini for context.
-    let (session_id, history) = {
-        let limit = state.settings.lock().session_limit as usize;
-        let mut store = state.sessions.lock();
-        let id = store.append_user_turn(session_id.as_deref(), &transcript);
-        store.prune(limit);
-        let history = store.find(&id).map(|s| s.turns.clone()).unwrap_or_default();
-        let _ = store.save();
-        (id, history)
-    };
+    let id = state
+        .agent
+        .admit_user_text(session_id.as_deref(), &transcript, None, "steer", false);
+    debug_log(&format!("ask-llm: admitted to session {id}"));
     let _ = app.emit(EVT_LLM_SESSION, ());
-    debug_log(&format!(
-        "ask-llm: session {session_id} ({} turns of context)",
-        history.len().saturating_sub(1)
-    ));
-    let messages: Vec<gemini::ChatMessage> = history
-        .iter()
-        .map(|turn| gemini::ChatMessage {
-            role: turn.role.clone(),
-            text: turn.text.clone(),
-        })
-        .collect();
-
-    let Some(client) = state.gemini.lock().clone() else {
-        state.sounds.play(sounds::Chime::Error);
-        emit_llm_status(
-            app,
-            "error",
-            &transcript,
-            "",
-            Some("Gemini is not configured".into()),
-            Vec::new(),
-        );
-        hide_llm_overlay_delayed(app, std::time::Duration::from_millis(1800));
-        return;
-    };
-
-    emit_llm_status(app, "thinking", &transcript, "", None, Vec::new());
-    let outcome = match client.chat(&messages) {
-        Ok(outcome) => {
-            debug_log(&format!(
-                "ask-llm: reply {} chars, {} sources",
-                outcome.text.chars().count(),
-                outcome.sources.len()
-            ));
-            outcome
-        }
-        Err(e) => {
-            debug_log(&format!("ask-llm: chat error -> {e}"));
-            state.sounds.play(sounds::Chime::Error);
-            emit_llm_status(
-                app,
-                "error",
-                &transcript,
-                "",
-                Some(e.to_string()),
-                Vec::new(),
-            );
-            hide_llm_overlay_delayed(app, std::time::Duration::from_millis(2500));
-            return;
-        }
-    };
-    let reply = outcome.text;
-    let sources: Vec<String> = outcome.sources.iter().map(|s| s.title.clone()).collect();
-    {
-        let limit = state.settings.lock().session_limit as usize;
-        let mut store = state.sessions.lock();
-        store.append_model_turn(&session_id, &reply);
-        store.prune(limit);
-        let _ = store.save();
-    }
-    let _ = app.emit(EVT_LLM_SESSION, ());
-    if state.cancel_pending.swap(false, Ordering::SeqCst) {
-        debug_log("ask-llm: cancelled before speech");
-        emit_llm_status(app, "cancelled", &transcript, &reply, None, sources.clone());
-        hide_llm_overlay_delayed(app, std::time::Duration::from_millis(500));
-        return;
-    }
-
-    let Some(speech) = state.sounds.open_speech() else {
-        state.sounds.play(sounds::Chime::Error);
-        emit_llm_status(
-            app,
-            "error",
-            &transcript,
-            &reply,
-            Some("No audio output available".into()),
-            sources.clone(),
-        );
-        hide_llm_overlay_delayed(app, std::time::Duration::from_millis(2000));
-        return;
-    };
-    *state.speech.lock() = Some(speech.clone());
-
-    emit_llm_status(app, "speaking", &transcript, &reply, None, sources.clone());
-    // Raw PCM tail kept back so the trailing noise artifact Gemini sometimes
-    // appends can be trimmed before it is played.
-    const TAIL_KEEP_SAMPLES: usize = 24_000; // 1 s at 24 kHz
-    let mut tail: Vec<i16> = Vec::new();
-    let stream_result = client.tts_stream(&reply, |chunk| {
-        if speech.is_cancelled() {
-            return Err(gemini::GeminiError::Cancelled);
-        }
-        let samples: Vec<i16> = chunk
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        tail.extend_from_slice(&samples);
-        if tail.len() > TAIL_KEEP_SAMPLES {
-            let flush_len = tail.len() - TAIL_KEEP_SAMPLES;
-            speech
-                .push_i16(&tail[..flush_len])
-                .map_err(|e| gemini::GeminiError::Tts(e.to_string()))?;
-            tail.drain(..flush_len);
-        }
-        Ok(())
-    });
-
-    match stream_result {
-        Err(gemini::GeminiError::Cancelled) => {
-            *state.speech.lock() = None;
-            debug_log("ask-llm: cancelled during stream");
-            emit_llm_status(app, "cancelled", &transcript, &reply, None, sources.clone());
-            hide_llm_overlay_delayed(app, std::time::Duration::from_millis(500));
-        }
-        Err(e) => {
-            *state.speech.lock() = None;
-            debug_log(&format!("ask-llm: tts error -> {e}"));
-            state.sounds.play(sounds::Chime::Error);
-            emit_llm_status(
-                app,
-                "error",
-                &transcript,
-                &reply,
-                Some(e.to_string()),
-                sources.clone(),
-            );
-            // Keep the panel open so the text reply can still be read.
-            hide_llm_overlay_delayed(app, std::time::Duration::from_millis(3000));
-        }
-        Ok(()) => {
-            if speech.is_cancelled() {
-                *state.speech.lock() = None;
-                debug_log("ask-llm: cancelled before tail");
-                emit_llm_status(app, "cancelled", &transcript, &reply, None, sources.clone());
-                hide_llm_overlay_delayed(app, std::time::Duration::from_millis(500));
-                return;
-            }
-            let trimmed = sounds::trim_noise_tail(&tail, gemini::TTS_SAMPLE_RATE);
-            if let Err(e) = speech.push_i16_final(&trimmed) {
-                *state.speech.lock() = None;
-                debug_log(&format!("ask-llm: playback error -> {e}"));
-                emit_llm_status(
-                    app,
-                    "error",
-                    &transcript,
-                    &reply,
-                    Some(format!("Couldn't play the reply: {e}")),
-                    sources.clone(),
-                );
-                hide_llm_overlay_delayed(app, std::time::Duration::from_millis(2500));
-                return;
-            }
-            let _ = speech.finish();
-            *state.speech.lock() = None;
-            if speech.is_cancelled() {
-                debug_log("ask-llm: cancelled during playback");
-                emit_llm_status(app, "cancelled", &transcript, &reply, None, sources.clone());
-                hide_llm_overlay_delayed(app, std::time::Duration::from_millis(500));
-            } else {
-                debug_log("ask-llm: speech played");
-                state.sounds.play(sounds::Chime::PasteDone);
-                emit_llm_status(app, "done", &transcript, &reply, None, sources);
-                hide_llm_overlay_delayed(app, std::time::Duration::from_millis(600));
-            }
-        }
-    }
+    update_tray(app, state);
 }
 
 /// Stop whatever the Ask-Gemini flow is currently doing: an active recording,
@@ -1243,6 +1561,15 @@ fn run_ask_llm(
 /// and the panel switches to "Cancelling…" immediately so the cancel is
 /// visible even while a blocking network call cannot be interrupted.
 fn cancel_ask_flow(app: &AppHandle, state: &Arc<AppState>) {
+    if let Some(session) = state.live_stt.lock().take() {
+        session.cancel();
+    }
+    if let Some(session) = state.local_stream.lock().take() {
+        session.cancel();
+    }
+    if let Some(recorder) = state.recorder.lock().as_ref() {
+        recorder.set_chunk_sink(None);
+    }
     if state.recording.load(Ordering::SeqCst) {
         debug_log("cancel: stopping recording");
         state.recording.store(false, Ordering::SeqCst);
@@ -1256,6 +1583,7 @@ fn cancel_ask_flow(app: &AppHandle, state: &Arc<AppState>) {
         update_tray(app, state);
     }
     state.cancel_pending.store(true, Ordering::SeqCst);
+    state.agent.stop();
     if let Some(speech) = state.speech.lock().as_ref() {
         speech.cancel();
     } else if !state.recording.load(Ordering::SeqCst) {
@@ -1315,6 +1643,10 @@ fn build_menu(app: &AppHandle, state: &AppState) -> tauri::Result<tauri::menu::M
 
     let status_text = if state.recording.load(Ordering::SeqCst) {
         "Recording…".to_string()
+    } else if state.agent.is_speaking() {
+        "Speaking…".to_string()
+    } else if state.agent.is_active() {
+        "Agent working…".to_string()
     } else if state.busy.load(Ordering::SeqCst) {
         if state.llm_mode.load(Ordering::SeqCst) {
             "Asking Gemini…".to_string()
@@ -1345,9 +1677,10 @@ fn build_menu(app: &AppHandle, state: &AppState) -> tauri::Result<tauri::menu::M
             String::new()
         };
         format!(
-            "Ready — hold {} to record · {} to ask Gemini{gemini_hint}",
+            "Ready — hold {} to record · {} to ask Gemini · {} for a screenshot{gemini_hint}",
             hotkey::display(&s.hotkey),
-            hotkey::display(&s.llm_hotkey)
+            hotkey::display(&s.llm_hotkey),
+            hotkey::display(&s.screenshot_hotkey)
         )
     };
     let status = MenuItem::with_id(app, "status", status_text, false, None::<&str>)?;
@@ -1367,18 +1700,16 @@ fn build_menu(app: &AppHandle, state: &AppState) -> tauri::Result<tauri::menu::M
 /// there (e.g. `get_active_session`) may need the sessions lock — holding it
 /// here would deadlock the app.
 fn build_sessions_submenu(app: &AppHandle, state: &AppState) -> tauri::Result<Submenu<tauri::Wry>> {
-    let (active_id, recent): (Option<String>, Vec<(String, String)>) = {
-        let store = state.sessions.lock();
-        (
-            store.active_id.clone(),
-            store
-                .sessions
-                .iter()
-                .take(SESSIONS_IN_MENU)
-                .map(|s| (s.id.clone(), sessions::menu_title(s, 48)))
-                .collect(),
-        )
-    };
+    let recent_sessions = state.agent.sessions(SESSIONS_IN_MENU + 1);
+    let active_id = recent_sessions
+        .iter()
+        .find(|s| s.active)
+        .map(|s| s.id.clone());
+    let recent: Vec<(String, String)> = recent_sessions
+        .iter()
+        .take(SESSIONS_IN_MENU)
+        .map(|s| (s.id.clone(), short_title(&s.title, 48)))
+        .collect();
     let submenu = Submenu::with_id(app, "sessions-menu", "Sessions", true)?;
     let new_item = CheckMenuItem::with_id(
         app,
@@ -1420,11 +1751,7 @@ fn build_sessions_submenu(app: &AppHandle, state: &AppState) -> tauri::Result<Su
 
 /// Switch to a clean context: the next Ask-LLM question starts a new session.
 fn start_new_session(app: &AppHandle, state: &Arc<AppState>) {
-    {
-        let mut store = state.sessions.lock();
-        store.start_new();
-        let _ = store.save();
-    }
+    state.agent.new_session();
     debug_log("sessions: new context (next question starts a session)");
     let _ = app.emit(EVT_LLM_SESSION, ());
     update_tray(app, state);
@@ -1432,19 +1759,21 @@ fn start_new_session(app: &AppHandle, state: &Arc<AppState>) {
 
 /// Make `id` the session the next Ask-LLM question continues.
 fn activate_session(app: &AppHandle, state: &Arc<AppState>, id: &str) {
-    let ok = {
-        let mut store = state.sessions.lock();
-        let ok = store.set_active(id);
-        if ok {
-            let _ = store.save();
-        }
-        ok
-    };
-    if ok {
+    if state.agent.set_active(id) {
         debug_log(&format!("sessions: active = {id}"));
         let _ = app.emit(EVT_LLM_SESSION, ());
         update_tray(app, state);
     }
+}
+
+fn short_title(title: &str, max_chars: usize) -> String {
+    let title = title.trim();
+    if title.chars().count() <= max_chars {
+        return title.to_string();
+    }
+    let mut short: String = title.chars().take(max_chars.saturating_sub(1)).collect();
+    short.push('…');
+    short
 }
 
 /// Open the Settings window's Sessions tab (the window may have just been
@@ -1547,6 +1876,45 @@ fn open_about(app: &AppHandle) {
     }
 }
 
+/// Restore a user-moved panel position if it is still on a connected monitor.
+fn apply_saved_overlay_position(
+    app: &AppHandle,
+    win: &tauri::WebviewWindow<tauri::Wry>,
+    state: &AppState,
+    llm: bool,
+) -> bool {
+    let position = {
+        let positions = state.overlay_positions.lock();
+        if llm {
+            positions.llm
+        } else {
+            positions.recording
+        }
+    };
+    let Some(position) = position else {
+        return false;
+    };
+    let size = win.outer_size().unwrap_or(tauri::PhysicalSize::new(1, 1));
+    let visible = app
+        .available_monitors()
+        .map(|monitors| {
+            monitors.iter().any(|monitor| {
+                let origin = monitor.position();
+                let area = monitor.size();
+                position.x + size.width as i32 > origin.x
+                    && position.x < origin.x + area.width as i32
+                    && position.y + size.height as i32 > origin.y
+                    && position.y < origin.y + area.height as i32
+            })
+        })
+        .unwrap_or(false);
+    if !visible {
+        return false;
+    }
+    let _ = win.set_position(PhysicalPosition::new(position.x, position.y));
+    true
+}
+
 fn show_overlay(app: &AppHandle, state: &Arc<AppState>) {
     let handle = app.clone();
     let state = state.clone();
@@ -1554,7 +1922,9 @@ fn show_overlay(app: &AppHandle, state: &Arc<AppState>) {
         let Some(win) = ensure_overlay(&handle, &state) else {
             return;
         };
-        position_overlay_bottom_center(&win);
+        if !apply_saved_overlay_position(&handle, &win, &state, false) {
+            position_overlay_bottom_center(&win);
+        }
         let _ = win.set_ignore_cursor_events(true);
         let _ = win.show();
     });
@@ -1592,7 +1962,9 @@ fn ensure_overlay(app: &AppHandle, state: &AppState) -> Option<tauri::WebviewWin
         .build()
         .ok()?;
     let _ = win.set_size(tauri::LogicalSize::new(OVERLAY_W, OVERLAY_H));
-    position_overlay_bottom_center(&win);
+    if !apply_saved_overlay_position(app, &win, state, false) {
+        position_overlay_bottom_center(&win);
+    }
     debug_log(&format!(
         "overlay: created {}x{}",
         OVERLAY_W as u32, OVERLAY_H as u32
@@ -1611,7 +1983,7 @@ fn position_overlay_bottom_center(win: &tauri::WebviewWindow<tauri::Wry>) {
     )));
 }
 
-fn show_llm_overlay(app: &AppHandle, state: &Arc<AppState>) {
+pub(crate) fn show_llm_overlay(app: &AppHandle, state: &Arc<AppState>) {
     let handle = app.clone();
     let state = state.clone();
     let _ = app.run_on_main_thread(move || {
@@ -1620,23 +1992,155 @@ fn show_llm_overlay(app: &AppHandle, state: &Arc<AppState>) {
         };
         // Taller panel when there is conversation to recall, so past turns can
         // be shown above the live one.
-        let has_history = state
-            .sessions
-            .lock()
-            .active()
-            .is_some_and(|s| !s.turns.is_empty());
-        let height = if has_history {
-            LLM_OVERLAY_H_HISTORY
-        } else {
-            LLM_OVERLAY_H
-        };
+        let height = LLM_OVERLAY_H;
         let _ = win.set_size(tauri::LogicalSize::new(LLM_OVERLAY_W, height));
-        position_llm_overlay_bottom_center(&win, height);
+        if !apply_saved_overlay_position(&handle, &win, &state, true) {
+            position_llm_overlay_bottom_center(&win, height);
+        }
         let _ = win.show();
         // Focus the panel so its Cancel button and Esc handling work. The
         // user is speaking, not typing, so stealing focus is acceptable.
         let _ = win.set_focus();
     });
+}
+
+fn show_screenshot_overlay(app: &AppHandle, state: &Arc<AppState>) {
+    if state.screenshot_selecting.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    *state.pending_screenshot.lock() = None;
+    let handle = app.clone();
+    let state = state.clone();
+    let _ = app.run_on_main_thread(move || {
+        let win = if let Some(win) = handle.get_webview_window(SHOT_ID) {
+            win
+        } else {
+            match WebviewWindowBuilder::new(&handle, SHOT_ID, WebviewUrl::App("shot.html".into()))
+                .decorations(false)
+                .transparent(true)
+                .shadow(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .resizable(false)
+                .visible(false)
+                .build()
+            {
+                Ok(win) => win,
+                Err(e) => {
+                    state.screenshot_selecting.store(false, Ordering::SeqCst);
+                    debug_log(&format!("screenshot overlay: create failed -> {e}"));
+                    emit_error(&handle, &format!("Could not open screenshot overlay: {e}"));
+                    return;
+                }
+            }
+        };
+        if let Ok(monitors) = handle.available_monitors() {
+            let cursor = handle.cursor_position().ok();
+            let monitor = cursor
+                .and_then(|cursor| {
+                    monitors.iter().find(|monitor| {
+                        let origin = monitor.position();
+                        let size = monitor.size();
+                        cursor.x >= origin.x as f64
+                            && cursor.y >= origin.y as f64
+                            && cursor.x < (origin.x + size.width as i32) as f64
+                            && cursor.y < (origin.y + size.height as i32) as f64
+                    })
+                })
+                .or_else(|| monitors.iter().find(|monitor| monitor.position().x == 0))
+                .or_else(|| monitors.first());
+            if let Some(monitor) = monitor {
+                let origin = monitor.position();
+                let size = monitor.size();
+                let _ = win.set_position(PhysicalPosition::new(origin.x, origin.y));
+                let _ = win.set_size(PhysicalSize::new(size.width, size.height));
+            }
+        }
+        let _ = win.set_ignore_cursor_events(false);
+        let _ = win.show();
+        let _ = win.set_focus();
+        debug_log("screenshot overlay: shown");
+    });
+}
+
+fn cancel_screenshot_overlay(app: &AppHandle, state: &AppState) {
+    state.screenshot_selecting.store(false, Ordering::SeqCst);
+    state.screenshot_hold.store(false, Ordering::SeqCst);
+    if let Some(win) = app.get_webview_window(SHOT_ID) {
+        let _ = win.hide();
+    }
+    debug_log("screenshot overlay: cancelled");
+}
+
+#[tauri::command]
+fn cancel_screenshot(app: AppHandle, state: State<'_, Arc<AppState>>) {
+    cancel_screenshot_overlay(&app, state.inner());
+    if let Some(session) = state.live_stt.lock().take() {
+        session.cancel();
+    }
+    if let Some(session) = state.local_stream.lock().take() {
+        session.cancel();
+    }
+}
+
+#[tauri::command]
+fn screenshot_region_selected(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    if !state.screenshot_selecting.swap(false, Ordering::SeqCst) {
+        return Err("screenshot selection is no longer active".into());
+    }
+    let win = app
+        .get_webview_window(SHOT_ID)
+        .ok_or_else(|| "screenshot overlay is gone".to_string())?;
+    let _ = win.hide();
+    // Let the compositor remove the overlay before capturing the screen.
+    std::thread::sleep(std::time::Duration::from_millis(140));
+
+    let screens = screenshots::Screen::all().map_err(|e| format!("Could not list screens: {e}"))?;
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let origin = win.outer_position().unwrap_or(PhysicalPosition::new(0, 0));
+    let logical_x = (origin.x as f64 / scale).round() as i32;
+    let logical_y = (origin.y as f64 / scale).round() as i32;
+    let screen = screenshots::Screen::from_point(logical_x, logical_y)
+        .ok()
+        .or_else(|| {
+            screens
+                .iter()
+                .find(|screen| screen.display_info.is_primary)
+                .cloned()
+        })
+        .or_else(|| screens.first().cloned())
+        .ok_or_else(|| "No screen available".to_string())?;
+    let image = screen
+        .capture_area(
+            x.round() as i32,
+            y.round() as i32,
+            width.round().max(1.0) as u32,
+            height.round().max(1.0) as u32,
+        )
+        .map_err(|e| format!("Could not capture the screen: {e}"))?;
+    let dir = crate::app_data_dir().join("screenshots");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("shot_{}.png", crate::core::agent::types::now_ms()));
+    image
+        .save(&path)
+        .map_err(|e| format!("Could not save the screenshot: {e}"))?;
+    debug_log(&format!("screenshot: saved {}", path.display()));
+    *state.pending_screenshot.lock() = Some(path.to_string_lossy().to_string());
+
+    if !state.screenshot_hold.load(Ordering::SeqCst) {
+        // The hotkey was released while the selection was being captured.
+        *state.pending_screenshot.lock() = None;
+        return Ok(());
+    }
+    begin_capture(&app, state.inner(), Mode::Screenshot);
+    Ok(())
 }
 
 fn hide_llm_overlay(app: &AppHandle) {
@@ -1677,7 +2181,9 @@ fn ensure_llm_overlay(
         .build()
         .ok()?;
     let _ = win.set_size(tauri::LogicalSize::new(LLM_OVERLAY_W, LLM_OVERLAY_H));
-    position_llm_overlay_bottom_center(&win, LLM_OVERLAY_H);
+    if !apply_saved_overlay_position(app, &win, state, true) {
+        position_llm_overlay_bottom_center(&win, LLM_OVERLAY_H);
+    }
     debug_log(&format!(
         "llm-overlay: created {}x{}",
         LLM_OVERLAY_W as u32, LLM_OVERLAY_H as u32
@@ -1871,6 +2377,56 @@ fn open_mic_settings() {
 }
 
 #[tauri::command]
+fn set_llm_overlay_expanded(state: State<'_, Arc<AppState>>, expanded: bool) {
+    let win = state.llm_overlay.lock().clone();
+    let Some(win) = win else {
+        return;
+    };
+    let height = if expanded {
+        LLM_OVERLAY_H_EXPANDED
+    } else {
+        LLM_OVERLAY_H
+    };
+    let _ = win.set_size(tauri::LogicalSize::new(LLM_OVERLAY_W, height));
+    let app = win.app_handle().clone();
+    if !apply_saved_overlay_position(&app, &win, state.inner(), true) {
+        position_llm_overlay_bottom_center(&win, height);
+    }
+    clamp_overlay_to_monitor(&win);
+}
+
+fn clamp_overlay_to_monitor(win: &tauri::WebviewWindow<tauri::Wry>) {
+    let (Ok(position), Ok(size), Ok(Some(monitor))) = (
+        win.outer_position(),
+        win.outer_size(),
+        win.current_monitor(),
+    ) else {
+        return;
+    };
+    let origin = monitor.position();
+    let area = monitor.size();
+    let max_x = origin.x + area.width as i32 - size.width as i32;
+    let max_y = origin.y + area.height as i32 - size.height as i32;
+    let x = position.x.clamp(origin.x, max_x.max(origin.x));
+    let y = position.y.clamp(origin.y, max_y.max(origin.y));
+    if x != position.x || y != position.y {
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+    }
+}
+
+#[tauri::command]
+fn save_overlay_position(state: State<'_, Arc<AppState>>, panel: String, x: i32, y: i32) {
+    let mut positions = state.overlay_positions.lock();
+    let position = Some(StoredPosition { x, y });
+    match panel.as_str() {
+        "llm" => positions.llm = position,
+        "recording" => positions.recording = position,
+        _ => return,
+    }
+    save_overlay_positions(&positions);
+}
+
+#[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
 }
@@ -1964,29 +2520,31 @@ fn get_gemini_catalog(
 /// Sessions, most recently updated first, with the active one flagged.
 #[tauri::command]
 fn list_sessions(state: State<'_, Arc<AppState>>) -> Vec<SessionMetaDto> {
-    let store = state.sessions.lock();
-    let active = store.active_id.clone();
-    store
-        .sessions
-        .iter()
-        .map(|s| session_meta(s, active.as_deref() == Some(s.id.as_str())))
+    state
+        .agent
+        .sessions(500)
+        .into_iter()
+        .map(|s| SessionMetaDto {
+            id: s.id,
+            title: s.title,
+            updated_at: s.updated_at,
+            turns: s.turns,
+            active: s.active,
+        })
         .collect()
 }
 
 #[tauri::command]
-fn get_session(state: State<'_, Arc<AppState>>, id: String) -> Option<SessionDto> {
-    let store = state.sessions.lock();
-    store
-        .find(&id)
-        .map(|s| session_dto(s, store.active_id.as_deref() == Some(s.id.as_str())))
+fn get_session(state: State<'_, Arc<AppState>>, id: String) -> Option<serde_json::Value> {
+    state.agent.session_detail(&id)
 }
 
 /// The session the next Ask-LLM question will continue, if any. `None` means
 /// the question will start a fresh session (clean context).
 #[tauri::command]
-fn get_active_session(state: State<'_, Arc<AppState>>) -> Option<SessionDto> {
-    let store = state.sessions.lock();
-    store.active().map(|s| session_dto(s, true))
+fn get_active_session(state: State<'_, Arc<AppState>>) -> Option<serde_json::Value> {
+    let active = state.agent.active_session_id()?;
+    state.agent.session_detail(&active)
 }
 
 /// Start a clean context for the next question.
@@ -2001,15 +2559,7 @@ fn set_active_session(
     state: State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<(), String> {
-    let ok = {
-        let mut store = state.sessions.lock();
-        let ok = store.set_active(&id);
-        if ok {
-            let _ = store.save();
-        }
-        ok
-    };
-    if !ok {
+    if !state.agent.set_active(&id) {
         return Err("session not found".into());
     }
     let _ = app.emit(EVT_LLM_SESSION, ());
@@ -2024,15 +2574,7 @@ fn rename_session(
     id: String,
     title: String,
 ) -> Result<(), String> {
-    let ok = {
-        let mut store = state.sessions.lock();
-        let ok = store.rename(&id, &title);
-        if ok {
-            let _ = store.save();
-        }
-        ok
-    };
-    if !ok {
+    if !state.agent.rename_session(&id, &title) {
         return Err("session not found".into());
     }
     let _ = app.emit(EVT_LLM_SESSION, ());
@@ -2046,17 +2588,10 @@ fn delete_session(
     state: State<'_, Arc<AppState>>,
     id: String,
 ) -> Result<(), String> {
-    let ok = {
-        let mut store = state.sessions.lock();
-        let ok = store.delete(&id);
-        if ok {
-            let _ = store.save();
-        }
-        ok
-    };
-    if !ok {
+    if state.agent.db.session(&id).is_none() {
         return Err("session not found".into());
     }
+    state.agent.delete_session(&id);
     debug_log(&format!("sessions: deleted {id}"));
     let _ = app.emit(EVT_LLM_SESSION, ());
     update_tray(&app, state.inner());
@@ -2119,6 +2654,19 @@ fn apply_settings(app: &AppHandle, state: &Arc<AppState>, s: &settings::Settings
                 );
             }
         }
+        match controller.rebind_screenshot(&s.screenshot_hotkey) {
+            Ok(()) => state.hotkey_shot_ok.store(true, Ordering::SeqCst),
+            Err(e) => {
+                state.hotkey_shot_ok.store(false, Ordering::SeqCst);
+                emit_error(
+                    app,
+                    &format!(
+                        "Screenshot hotkey \"{}\" could not be registered: {e}",
+                        hotkey::display(&s.screenshot_hotkey)
+                    ),
+                );
+            }
+        }
     }
 
     *state.gemini.lock() = Some(gemini::GeminiClient::new(
@@ -2129,15 +2677,8 @@ fn apply_settings(app: &AppHandle, state: &Arc<AppState>, s: &settings::Settings
         &s.tts_voice,
     ));
 
-    {
-        let mut store = state.sessions.lock();
-        let before = store.sessions.len();
-        store.prune(s.session_limit as usize);
-        if store.sessions.len() != before {
-            let _ = store.save();
-            let _ = app.emit(EVT_LLM_SESSION, ());
-        }
-    }
+    state.agent.db.prune_sessions(s.session_limit as usize);
+    let _ = app.emit(EVT_LLM_SESSION, ());
 
     let autolaunch = app.autolaunch();
     let _ = match s.launch_at_login {
@@ -2168,6 +2709,10 @@ fn model_is_valid(state: &AppState, model_id: &str) -> bool {
     let Some(model) = state.registry.find(model_id) else {
         return false;
     };
+    if model.engine == "gemini" {
+        // Cloud model: nothing to download; the API key is checked when it runs.
+        return true;
+    }
     if model.files.is_empty() {
         return state
             .registry
@@ -2182,6 +2727,13 @@ fn model_is_valid(state: &AppState, model_id: &str) -> bool {
 }
 
 fn start_download(app: &AppHandle, state: &Arc<AppState>, model_id: &str) {
+    if state
+        .registry
+        .find(model_id)
+        .is_some_and(|model| model.engine == "gemini")
+    {
+        return;
+    }
     {
         let mut downloading = state.downloading.lock();
         if downloading.is_some() || downloading.as_deref() == Some(model_id) {
@@ -2317,16 +2869,18 @@ fn get_models(state: State<'_, Arc<AppState>>) -> Vec<ModelStatusDto> {
         .models()
         .iter()
         .map(|m| {
+            let cloud = m.engine == "gemini";
             let path = registry.resolve_path(&m.id);
-            let downloaded = if m.files.is_empty() {
-                path.as_ref().is_some_and(|p| p.exists())
-            } else {
-                let dir = registry.download_dir();
-                m.files.iter().all(|f| {
-                    use crate::downloader::is_valid_download;
-                    is_valid_download(&dir.join(&f.filename), f.size_bytes)
-                })
-            };
+            let downloaded = cloud
+                || if m.files.is_empty() {
+                    path.as_ref().is_some_and(|p| p.exists())
+                } else {
+                    let dir = registry.download_dir();
+                    m.files.iter().all(|f| {
+                        use crate::downloader::is_valid_download;
+                        is_valid_download(&dir.join(&f.filename), f.size_bytes)
+                    })
+                };
             ModelStatusDto {
                 id: m.id.clone(),
                 name: m.name.clone(),
@@ -2337,6 +2891,8 @@ fn get_models(state: State<'_, Arc<AppState>>) -> Vec<ModelStatusDto> {
                 downloaded,
                 path: path.map(|p| p.to_string_lossy().to_string()),
                 active: m.id == active,
+                engine: m.engine.clone(),
+                cloud,
             }
         })
         .collect()

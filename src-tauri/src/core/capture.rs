@@ -122,6 +122,7 @@ pub struct AudioRecorder {
     capturing: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     running: Arc<AtomicBool>,
+    chunk_sink: Arc<Mutex<Option<std::sync::mpsc::Sender<Vec<f32>>>>>,
 }
 
 impl AudioRecorder {
@@ -130,11 +131,13 @@ impl AudioRecorder {
         let capturing = Arc::new(AtomicBool::new(false));
         let level = Arc::new(AtomicU32::new(0));
         let running = Arc::new(AtomicBool::new(true));
+        let chunk_sink = Arc::new(Mutex::new(None));
 
         let ring_cb = ring.clone();
         let capturing_cb = capturing.clone();
         let level_cb = level.clone();
         let running_cb = running.clone();
+        let sink_cb = chunk_sink.clone();
         let device_name = device_name.to_string();
         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
 
@@ -144,7 +147,7 @@ impl AudioRecorder {
                 // Keep the stream alive for the lifetime of this thread: a dropped
                 // cpal::Stream stops the microphone. The thread polls `running` and
                 // exits when the recorder is dropped.
-                match build_stream(ring_cb, capturing_cb, level_cb, &device_name) {
+                match build_stream(ring_cb, capturing_cb, level_cb, sink_cb, &device_name) {
                     Ok(stream) => {
                         if let Err(e) = stream.play() {
                             let _ = tx.send(Err(format!("failed to start microphone: {e}")));
@@ -168,6 +171,7 @@ impl AudioRecorder {
                 capturing,
                 level,
                 running,
+                chunk_sink,
             }),
             Ok(Err(e)) => Err(anyhow::anyhow!(e)),
             Err(_) => Err(anyhow::anyhow!("audio thread did not start within 10s")),
@@ -194,6 +198,12 @@ impl AudioRecorder {
     pub fn level(&self) -> u32 {
         self.level.load(Ordering::SeqCst)
     }
+
+    /// Attach or detach a live consumer for resampled 16 kHz mono chunks.
+    /// Used by live transcription; the ring buffer still records everything.
+    pub fn set_chunk_sink(&self, sink: Option<std::sync::mpsc::Sender<Vec<f32>>>) {
+        *self.chunk_sink.lock() = sink;
+    }
 }
 
 impl Drop for AudioRecorder {
@@ -206,6 +216,7 @@ fn build_stream(
     ring: Arc<Mutex<RingBuffer>>,
     capturing: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
+    chunk_sink: Arc<Mutex<Option<std::sync::mpsc::Sender<Vec<f32>>>>>,
     device_name: &str,
 ) -> Result<cpal::Stream, String> {
     let device =
@@ -225,6 +236,7 @@ fn build_stream(
             ring,
             capturing,
             level,
+            chunk_sink.clone(),
         ),
         cpal::SampleFormat::I16 => build::<i16>(
             &device,
@@ -234,6 +246,7 @@ fn build_stream(
             ring,
             capturing,
             level,
+            chunk_sink.clone(),
         ),
         cpal::SampleFormat::U16 => build::<u16>(
             &device,
@@ -243,6 +256,7 @@ fn build_stream(
             ring,
             capturing,
             level,
+            chunk_sink.clone(),
         ),
         cpal::SampleFormat::I32 => build::<i32>(
             &device,
@@ -252,6 +266,7 @@ fn build_stream(
             ring,
             capturing,
             level,
+            chunk_sink.clone(),
         ),
         cpal::SampleFormat::U32 => build::<u32>(
             &device,
@@ -261,6 +276,7 @@ fn build_stream(
             ring,
             capturing,
             level,
+            chunk_sink.clone(),
         ),
         other => return Err(format!("unsupported input sample format: {other}")),
     }?;
@@ -276,6 +292,7 @@ fn build<T>(
     ring: Arc<Mutex<RingBuffer>>,
     capturing: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
+    chunk_sink: Arc<Mutex<Option<std::sync::mpsc::Sender<Vec<f32>>>>>,
 ) -> Result<cpal::Stream, String>
 where
     T: cpal::SizedSample,
@@ -307,6 +324,9 @@ where
                 level.store(scaled, Ordering::SeqCst);
                 let mut out = Vec::new();
                 resampler.process(&mono, &mut out);
+                if let Some(sink) = chunk_sink.lock().as_ref() {
+                    let _ = sink.send(out.clone());
+                }
                 ring.push(&out);
             },
             |_err| {},

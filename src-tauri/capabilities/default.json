@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capability for the settings window",
   "windows": ["settings", "recording-overlay", "about", "permissions-gate", "llm-overlay"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
 }

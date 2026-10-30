@@ -499,3 +499,105 @@ button.secondary:hover {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* Agent workspace */
+.agent-subhead {
+  margin: 12px 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.plan-item,
+.tool-row,
+.run-row,
+.run-step,
+.run-tool,
+.run-event,
+.job-row,
+.permission-row,
+.agent-artifact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.plan-mark {
+  width: 16px;
+  text-align: center;
+  color: var(--muted);
+}
+.plan-item.completed .plan-mark { color: var(--ok); }
+.plan-item.in_progress .plan-mark { color: var(--warn); }
+.plan-item.blocked .plan-mark { color: var(--err); }
+.plan-item.completed { color: var(--muted); text-decoration: line-through; }
+.plan-item.blocked { color: var(--err); }
+.artifact-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.artifact-meta,
+.run-meta,
+.tool-status,
+.job-meta,
+.permission-scope {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.run-row { cursor: pointer; }
+.run-row:hover { background: #f3f6fa; }
+.run-status,
+.job-status,
+.tool-status {
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+.run-row.succeeded .run-status,
+.job-row.succeeded .job-status,
+.tool-row.succeeded .tool-status { color: var(--ok); }
+.run-row.failed .run-status,
+.job-row.failed .job-status,
+.tool-row.failed .tool-status { color: var(--err); }
+.run-row.running .run-status,
+.job-row.running .job-status,
+.tool-row.running .tool-status { color: var(--warn); }
+.run-when,
+.job-kind,
+.tool-name,
+.permission-action {
+  font-weight: 600;
+}
+.run-detail {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.run-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.run-detail-head button { margin-left: auto; }
+.run-step,
+.run-tool,
+.run-event {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--muted);
+  word-break: break-word;
+}
+.run-tool.failed { color: var(--err); }
+.permission-row button { margin-left: auto; }
+.job-row button { margin-left: 10px; }
+.agent-plan,
+.agent-artifacts,
+.agent-tools { margin-top: 10px; }

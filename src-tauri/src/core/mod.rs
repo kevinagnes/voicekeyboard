@@ -1,6 +1,10 @@
+pub mod agent;
 pub mod capture;
 pub mod gemini;
+pub mod gemini_stt;
 pub mod hotkey;
+pub mod live_stt;
+pub mod local_stream;
 pub mod mic;
 pub mod nemotron;
 pub mod paste;

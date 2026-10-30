@@ -2,7 +2,8 @@
 
 A local, offline-first push-to-talk dictation app (macOS, v1). While any text field is
 focused, **hold a hotkey → speak → release** and the transcript is pasted instantly into the
-field. 100% on-device — no audio leaves your machine.
+field. Local Whisper/Nemotron dictation keeps audio on-device; the optional **Gemini 3.5
+Transcribe** engine and the Ask-Gemini assistant send data to Google.
 
 A second hotkey (**Ask Gemini**, default `ctrl+ShiftRight`) turns dictation into a voice
 assistant: **hold → speak a question → release**, and the transcript is sent to the Gemini
@@ -19,11 +20,13 @@ Technology: https://doc.rust-lang.org/stable/cargo/
 |---|---|---|
 | Hotkey | `src-tauri/src/core/hotkey.rs` | Global hold/release hotkeys (Carbon `RegisterEventHotKey`), combo parsing, rebinding (record + ask-LLM) |
 | Capture | `src-tauri/src/core/capture.rs` | `cpal` mic → 16 kHz mono ring buffer, streaming resampler, silence trim |
-| STT | `src-tauri/src/core/stt.rs` | `whisper-rs` (whisper.cpp + Metal) engine, language auto/override, initial prompt |
+| STT | `src-tauri/src/core/stt.rs`, `gemini_stt.rs` | `whisper-rs` (whisper.cpp + Metal) / ONNX Nemotron local engines, or **Gemini 3.5 Transcribe** batch API; language auto/override, initial prompt |
 | Gemini | `src-tauri/src/core/gemini.rs` | Ask-LLM client: chat grounded in **Google Search** (generateContent `google_search` tool, sources from `groundingMetadata`), **streaming** Interactions-API TTS (SSE `step.delta`, 24 kHz PCM), models/voices catalog (`language_code`-filtered) |
 | Paste | `src-tauri/src/core/paste.rs` | Clipboard save → set → Cmd/Ctrl+V → restore; secure-field guard; text sanitize |
 | Sounds | `src-tauri/src/core/sounds.rs` | Synthesized chimes + **streaming speech playback** (stateful resampler, noise-tail trim, cancellable), mute toggle |
 | Settings | `src-tauri/src/core/settings.rs` | Persisted JSON settings (`~/Library/Application Support/.../settings.json`) |
+| Agent core | `src-tauri/src/core/agent/` | Durable SQLite step log, single-flight executor, inbox/steering, frozen tool runtime, permission gate, plans/artifacts/verification, compaction, jobs/subagents, run inspector, undo, streaming speech |
+| Workspace | `<app data>/workspace` | Sandbox-free file workspace for `read`/`write`/`edit`/`glob`/`grep`, plus `skills/*.md` |
 | Registry/Download | `src-tauri/src/model_registry.rs`, `src-tauri/src/downloader.rs` | Model catalog, resumable download with retry/backoff + checksum verify |
 | Shell | `src-tauri/src/app.rs` | Menu-bar tray, state machine, Tauri commands/events, worker threads, LLM overlay window |
 
@@ -147,18 +150,42 @@ retried with exponential backoff. It is cached in the app data dir.
   `pt-BR`, `en` → `en-US`) and re-loaded automatically when you change the language;
   groups still label each voice's language, and the list falls back to all voices if a
   language has none.
-- **Sessions**: every Ask-Gemini interaction belongs to a session that can be recalled
-  and continued. The next question always continues the active session, with the whole
-  conversation replayed to Gemini for context. A **Sessions** submenu in the menu bar
-  lists recent sessions ("New Session (clean context)" plus the last 12), and a
-  **Sessions tab in Settings** lets you read, rename, delete, or continue any session.
-  While the panel is listening, its **+ New session** button switches the question you
-  are speaking into a fresh context. Sessions are stored in `sessions.json` in the app
-  data dir ("Keep last N sessions" in Settings, default 30, prunes the oldest).
+- **Dictation engines**: local Whisper and Nemotron are fully on-device. **Gemini 3.5 Transcribe** is an optional cloud engine selected in Settings → Model; after the hotkey is released the recorded utterance (16 kHz WAV) is sent to Google for transcription. It needs the Gemini API key and does not download a model.
+- **Sessions**: every Ask-Gemini interaction belongs to a durable session that can be
+  recalled and continued. The next question continues the active session, with the whole
+  conversation replayed for context. A **Sessions** submenu in the menu bar lists recent
+  sessions ("New Session (clean context)" plus the last 12), and a **Sessions tab in
+  Settings** lets you read, rename, delete, or continue any session. While the panel is
+  listening, its **+ New session** button switches the question you are speaking into a
+  fresh context. Sessions live in `agent.db`; the legacy `sessions.json` is imported once
+  and left in place.
+- **Agent workflow**: the Ask hotkey now runs a durable agent, not a single completion.
+  It can plan (`update_plan`), read/write/edit files in the workspace, search and fetch
+  the web, use the clipboard and paste, remember facts, save skills, verify artifacts,
+  run background jobs and delegate read-only subtasks. Every write or side effect asks
+  through the overlay (allow once / always for this session / deny). Context is compacted
+  with a durable checkpoint; interrupted runs resume honestly after a restart, and the
+  Agent tab exposes a run inspector with file undo. See
+  [`docs/agent-core-v2-port.md`](docs/agent-core-v2-port.md).
+- **Movable Ask panel**: drag it anywhere by its grip or any non-text area. Its position is
+  remembered in `overlay_positions.json` and restored on the next launch; if the monitor
+  is gone, it falls back to bottom-center. The panel shows only the current exchange by
+  default; click the transcript/reply (or the History pill) to expand the whole session,
+  and click again to collapse.
+- **Screenshot question**: press the screenshot hotkey (default `Ctrl+Shift+S`), drag a
+  region of the screen, then keep holding and speak about it. Release to send the region
+  plus your spoken question to the assistant; the answer is spoken and shown with the
+  screenshot attached.
+- **Live transcription**: audio is transcribed while you speak for every engine.
+  Gemini Transcribe uses the Live API (true streaming and a final ready on release).
+  Whisper and Nemotron use incremental on-device transcription: audio is cut at
+  natural pauses, each segment is transcribed with the previous text as context,
+  and only the short tail is processed on release. Partials appear in the Ask panel;
+  if incremental transcription fails, VoiceKeyboard falls back to the normal batch path.
 - Requires a Gemini API key (Settings → AI Assistant); the API key is stored in the local
   `settings.json`.
-- No telemetry, no logs of transcripts. The only network calls are the model download and,
-  when used, the Gemini API (the Ask-LLM hotkey).
+- No telemetry, no logs of transcripts. The only network calls are local-model
+  downloads and, when used, the Gemini API (Ask-Gemini and Gemini 3.5 Transcribe).
 
 ## Tests
 
@@ -168,8 +195,10 @@ cargo test
 ```
 
 Unit tests cover hotkey parsing, ring buffer, resampler, silence trim, sanitize, chime
-synthesis, registry parsing, SHA-256 verification, and the session store (titles,
-pruning, recall).
+synthesis, registry parsing, SHA-256 verification, the session store (titles,
+pruning, recall), and the agent core (durable sequencing, idempotent admission,
+claims, permissions, schema repair, prompt prefix stability, compaction split,
+speech segmentation, path guards and workspace tools).
 
 ## Roadmap (per spec)
 

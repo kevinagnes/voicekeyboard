@@ -28,6 +28,12 @@ futures-util = "0.3"
 parking_lot = "0.12"
 rustfft = "6"
 ndarray = "0.17.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+tungstenite = { version = "0.24", features = ["native-tls"] }
+native-tls = "0.2"
+screenshots = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["download-binaries", "std", "tls-rustls", "directml", "cuda", "tensorrt", "nvrtx"] }
@@ -54,3 +60,6 @@ whisper-rs = "0.16"
 lto = true
 codegen-units = 1
 strip = true
+
+[dev-dependencies]
+hound = "3"

@@ -72,6 +72,7 @@ pub struct HotkeyController {
     manager: global_hotkey::GlobalHotKeyManager,
     record: Option<HotKey>,
     llm: Option<HotKey>,
+    screenshot: Option<HotKey>,
 }
 
 // On Windows GlobalHotKeyManager holds a raw HWND whose register/unregister/drop
@@ -87,6 +88,7 @@ impl HotkeyController {
             manager,
             record: None,
             llm: None,
+            screenshot: None,
         })
     }
 
@@ -116,6 +118,19 @@ impl HotkeyController {
         Ok(())
     }
 
+    /// Register (or rebind) the screenshot-question hotkey.
+    pub fn rebind_screenshot(&mut self, spec: &str) -> Result<(), HotkeyError> {
+        let hotkey = parse(spec)?;
+        if let Some(prev) = self.screenshot.take() {
+            let _ = self.manager.unregister(prev);
+        }
+        self.manager
+            .register(hotkey)
+            .map_err(|e| HotkeyError::Register(e.to_string()))?;
+        self.screenshot = Some(hotkey);
+        Ok(())
+    }
+
     /// Id of the registered record hotkey, if any.
     pub fn record_id(&self) -> Option<u32> {
         self.record.map(|hk| hk.id())
@@ -126,11 +141,19 @@ impl HotkeyController {
         self.llm.map(|hk| hk.id())
     }
 
+    /// Id of the registered screenshot hotkey, if any.
+    pub fn screenshot_id(&self) -> Option<u32> {
+        self.screenshot.map(|hk| hk.id())
+    }
+
     pub fn unregister(&mut self) {
         if let Some(prev) = self.record.take() {
             let _ = self.manager.unregister(prev);
         }
         if let Some(prev) = self.llm.take() {
+            let _ = self.manager.unregister(prev);
+        }
+        if let Some(prev) = self.screenshot.take() {
             let _ = self.manager.unregister(prev);
         }
     }

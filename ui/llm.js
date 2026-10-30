@@ -13,13 +13,24 @@ const sourcesEl = document.getElementById("sources");
 const historyEl = document.getElementById("history");
 const sessionTitleEl = document.getElementById("sessionTitle");
 const newSessionBtn = document.getElementById("newSessionBtn");
+const historyToggle = document.getElementById("historyToggle");
+const shotChip = document.getElementById("shotChip");
+const planEl = document.getElementById("plan");
+const toolEl = document.getElementById("tool");
+const artifactsEl = document.getElementById("artifacts");
+const permissionEl = document.getElementById("permission");
+const permissionTitleEl = document.getElementById("permissionTitle");
+const permissionDetailEl = document.getElementById("permissionDetail");
+const permissionButtonsEl = document.getElementById("permissionButtons");
 
-const HISTORY_TURNS = 8;
+let sessionTurns = [];
+let historyExpanded = false;
 
 const PHASE_DOT = {
   listening: "#ff3b30",
   transcribing: "#ffa02e",
   thinking: "#b392f0",
+  tool: "#f5a623",
   speaking: "#34c759",
   done: "#34c759",
   cancelled: "#8e8e93",
@@ -31,6 +42,7 @@ const PHASE_LABEL = {
   listening: "Listening…",
   transcribing: "Transcribing…",
   thinking: "Thinking",
+  tool: "Working",
   speaking: "Speaking",
   done: "Done",
   cancelled: "Cancelled",
@@ -42,6 +54,7 @@ const CANCEL_PHASES = new Set([
   "listening",
   "transcribing",
   "thinking",
+  "tool",
   "speaking",
 ]);
 
@@ -83,12 +96,97 @@ function setSources(list) {
   sourcesEl.style.display = "block";
 }
 
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+function setPlan(items) {
+  if (!items || !items.length) {
+    planEl.style.display = "none";
+    planEl.innerHTML = "";
+    return;
+  }
+  const current =
+    items.find((i) => i.status === "in_progress") ||
+    items.find((i) => i.status === "pending") ||
+    items[items.length - 1];
+  const done = items.filter((i) => i.status === "completed").length;
+  planEl.innerHTML = `<b>Plan ${done}/${items.length}</b> · ${escapeHtml(
+    current.title
+  )}${current.status === "blocked" ? " (blocked)" : ""}`;
+  planEl.style.display = "block";
 }
+
+function setTool(tools) {
+  if (!tools || !tools.length) {
+    toolEl.style.display = "none";
+    toolEl.innerHTML = "";
+    return;
+  }
+  const last = tools[tools.length - 1];
+  toolEl.innerHTML = `<b>${escapeHtml(last)}</b> · ${tools.length} tool${
+    tools.length === 1 ? "" : "s"
+  } this step`;
+  toolEl.style.display = "block";
+}
+
+function setArtifacts(items) {
+  if (!items || !items.length) {
+    artifactsEl.style.display = "none";
+    artifactsEl.innerHTML = "";
+    return;
+  }
+  const names = items.map((a) => a.title || a.path).slice(-3);
+  artifactsEl.innerHTML = `<b>Files</b> · ${names.map(escapeHtml).join(" · ")}`;
+  artifactsEl.style.display = "block";
+}
+
+let currentPermission = null;
+
+function closePermission() {
+  currentPermission = null;
+  permissionEl.style.display = "none";
+  permissionButtonsEl.innerHTML = "";
+}
+
+function respond(decision) {
+  if (!currentPermission) return;
+  const id = currentPermission.id;
+  closePermission();
+  invoke("respond_permission", { id, decision }).catch(() => {});
+}
+
+function denyWithReason() {
+  const reason = window.prompt("Tell the assistant why (it will see this):", "");
+  if (reason === null) return;
+  respond({ denyWithReason: reason });
+}
+
+function showPermission(request) {
+  currentPermission = request;
+  permissionTitleEl.textContent = request.title || "Permission";
+  permissionDetailEl.textContent = request.detail || "";
+  permissionButtonsEl.innerHTML = "";
+  const allow = document.createElement("button");
+  allow.className = "primary";
+  allow.textContent = "Allow once";
+  allow.addEventListener("click", () => respond("allowOnce"));
+  permissionButtonsEl.appendChild(allow);
+  if (request.allowAlways) {
+    const always = document.createElement("button");
+    always.textContent = "Always allow for this session";
+    always.addEventListener("click", () => respond("alwaysAllow"));
+    permissionButtonsEl.appendChild(always);
+  }
+  const deny = document.createElement("button");
+  deny.className = "danger";
+  deny.textContent = "Deny";
+  deny.addEventListener("click", () => respond("deny"));
+  permissionButtonsEl.appendChild(deny);
+  const reason = document.createElement("button");
+  reason.textContent = "Deny with reason…";
+  reason.addEventListener("click", denyWithReason);
+  permissionButtonsEl.appendChild(reason);
+  permissionEl.style.display = "flex";
+  permissionEl.style.flexDirection = "column";
+}
+
 
 function showError(message) {
   errorEl.textContent = message;
@@ -122,26 +220,24 @@ async function refreshSession() {
   } catch {
     session = null;
   }
-  const turns = (session && session.turns) || [];
+  sessionTurns = (session && session.turns) || [];
   sessionTitleEl.textContent = session
     ? `· ${session.title}`
     : "· new session";
   newSessionBtn.disabled = !session;
+  historyToggle.style.display = sessionTurns.length ? "block" : "none";
+  historyToggle.textContent = historyExpanded ? "Hide" : "History";
+  historyToggle.classList.toggle("on", historyExpanded);
+  renderHistory();
+}
 
+function renderHistory() {
   historyEl.innerHTML = "";
-  if (!turns.length) {
+  if (!historyExpanded || !sessionTurns.length) {
     historyEl.style.display = "none";
     return;
   }
-  const shown = turns.slice(-HISTORY_TURNS);
-  const hidden = turns.length - shown.length;
-  if (hidden > 0) {
-    const more = document.createElement("div");
-    more.id = "historyMore";
-    more.textContent = `${hidden} earlier ${hidden === 1 ? "message" : "messages"} — open Sessions in Settings to read them`;
-    historyEl.appendChild(more);
-  }
-  for (const t of shown) {
+  for (const t of sessionTurns) {
     const row = document.createElement("div");
     row.className = `hist-row ${t.role === "user" ? "you" : "gemini"}`;
     const who = document.createElement("div");
@@ -157,6 +253,22 @@ async function refreshSession() {
   historyEl.style.display = "flex";
   historyEl.scrollTop = historyEl.scrollHeight;
 }
+
+function toggleHistory() {
+  if (!sessionTurns.length) return;
+  historyExpanded = !historyExpanded;
+  invoke("set_llm_overlay_expanded", { expanded: historyExpanded }).catch(() => {});
+  historyToggle.textContent = historyExpanded ? "Hide" : "History";
+  historyToggle.classList.toggle("on", historyExpanded);
+  renderHistory();
+}
+
+historyToggle.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleHistory();
+});
+transcriptEl.addEventListener("click", toggleHistory);
+replyEl.addEventListener("click", toggleHistory);
 
 function safeListen(name, handler) {
   Promise.resolve(listen(name, handler)).catch(() => {});
@@ -181,7 +293,11 @@ newSessionBtn.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     e.preventDefault();
-    cancel();
+    if (currentPermission) {
+      respond("deny");
+    } else {
+      cancel();
+    }
   }
 });
 
@@ -196,13 +312,71 @@ safeListen("llm-status", (e) => {
     setText(transcriptEl, "");
     setText(replyEl, "");
     setSources(null);
+    setPlan(null);
+    setTool(null);
+    setArtifacts(null);
+    shotChip.style.display = "none";
+    if (phase === "listening" && historyExpanded) {
+      historyExpanded = false;
+      invoke("set_llm_overlay_expanded", { expanded: false }).catch(() => {});
+      historyToggle.textContent = "History";
+      historyToggle.classList.remove("on");
+      renderHistory();
+    }
   }
   if (s.transcript) setText(transcriptEl, s.transcript);
   if (s.reply) setText(replyEl, s.reply);
   if (s.sources) setSources(s.sources);
+  if (s.plan) setPlan(s.plan);
+  if (s.tools) setTool(s.tools);
+  if (s.artifacts) setArtifacts(s.artifacts);
+  if (s.detail && (phase === "tool" || phase === "thinking")) {
+    phaseEl.textContent = s.detail;
+  }
   if (s.error) showError(s.error);
   if (phase === "listening") refreshSession();
 });
+
+safeListen("agent-permission", (e) => {
+  const request = (e && e.payload) || {};
+  if (request.id) showPermission(request);
+});
+
+safeListen("agent-permission-closed", () => {
+  closePermission();
+});
+
+safeListen("stt-partial", (e) => {
+  const text = e && e.payload && e.payload.text;
+  if (text && (currentPhase === "listening" || currentPhase === "transcribing")) {
+    setText(transcriptEl, text);
+  }
+});
+
+safeListen("screenshot-attached", () => {
+  shotChip.style.display = "block";
+});
+
+// Remember where the user drags the panel. Coordinates are physical pixels so
+// the position survives monitor scaling and restarts.
+try {
+  const windowApi = window.__TAURI__ && window.__TAURI__.window;
+  const current = windowApi && windowApi.getCurrentWindow ? windowApi.getCurrentWindow() : null;
+  if (current && current.onMoved) {
+    let moveTimer = null;
+    current.onMoved(({ payload }) => {
+      if (!payload) return;
+      clearTimeout(moveTimer);
+      const x = Math.round(payload.x);
+      const y = Math.round(payload.y);
+      moveTimer = setTimeout(() => {
+        invoke("save_overlay_position", { panel: "llm", x, y }).catch(() => {});
+      }, 300);
+    });
+  }
+} catch {
+  // older webview / API unavailable: the panel still works, just not persisted
+}
 
 // Keep the recalled history in sync when sessions change from the menu or
 // Settings — but ignore mid-flight changes: the live turn must not appear
@@ -214,3 +388,9 @@ safeListen("llm-session", () => {
 refreshSession();
 setPhase("listening");
 setInterval(sampleLevel, 80);
+
+invoke("pending_permission")
+  .then((request) => {
+    if (request && request.id) showPermission(request);
+  })
+  .catch(() => {});
